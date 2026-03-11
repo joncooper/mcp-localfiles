@@ -31,4 +31,6 @@ None.
 
 # New Observations
 
+- `POST /mcp` is implemented, but the MCP Streamable HTTP transport also requires the endpoint to support `GET`. The current server still returns `405 Method Not Allowed` for `GET /mcp`.
+- The server now negotiates `initialize.protocolVersion`, but it still does not validate the `MCP-Protocol-Version` HTTP header on subsequent requests or reject unsupported values with `400 Bad Request`.
 - In-root symlinks are now rejected consistently instead of being followed. That keeps confinement simple and predictable, but symlink-based aliases inside the served tree are no longer supported.
