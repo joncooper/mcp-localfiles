@@ -140,7 +140,9 @@ func TestMCPSuccessfulRPCResponseRecordsStatusCode(t *testing.T) {
 		"id":      2,
 		"method":  "tools/list",
 	})
-	resp := postMCP(t, srv, body)
+	resp := postMCPWithHeaders(t, srv, body, map[string]string{
+		"MCP-Protocol-Version": "2025-06-18",
+	})
 
 	if resp.Code != http.StatusOK {
 		t.Fatalf("expected tools/list to return 200, got %d", resp.Code)

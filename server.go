@@ -140,17 +140,13 @@ func (s *MCPServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if s.onEvent == nil {
 			return
 		}
-		status := rw.status
-		if status == 0 {
-			status = http.StatusOK
-		}
 		s.onEvent(MCPEvent{
 			Timestamp:  time.Now(),
 			Client:     client,
 			Method:     method,
 			Tool:       tool,
 			Details:    details,
-			Status:     status,
+			Status:     rw.status,
 			Error:      errMsg,
 			Latency:    time.Since(start),
 			Authorized: authorized,
@@ -632,6 +628,7 @@ func writeRPCResult(w http.ResponseWriter, id json.RawMessage, result interface{
 		Result:  resultBody,
 	}
 	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
