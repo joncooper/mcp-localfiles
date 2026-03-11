@@ -33,7 +33,9 @@ func TestMCPRejectsSubsequentRequestWithoutProtocolHeader(t *testing.T) {
 		"id":      2,
 		"method":  "tools/list",
 	})
-	resp := postMCP(t, srv, body)
+	resp := postMCPWithHeaders(t, srv, body, map[string]string{
+		"MCP-Protocol-Version": "",
+	})
 
 	if resp.Code != http.StatusBadRequest {
 		t.Fatalf("expected tools/list without MCP-Protocol-Version header to return 400, got %d body=%s", resp.Code, resp.Body.String())

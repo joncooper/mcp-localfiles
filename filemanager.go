@@ -629,19 +629,19 @@ func truncateLineForMatch(line string, start, end int) string {
 
 	if cutEnd-cutStart > maxContentLen {
 		excess := (cutEnd - cutStart) - maxContentLen
-		trimRight := minInt(excess/2, cutEnd-end)
+		trimRight := min(excess/2, cutEnd-end)
 		cutEnd -= trimRight
 		excess -= trimRight
-		trimLeft := minInt(excess, start-cutStart)
+		trimLeft := min(excess, start-cutStart)
 		cutStart += trimLeft
 		excess -= trimLeft
 		if excess > 0 {
-			trimRight = minInt(excess, cutEnd-end)
+			trimRight = min(excess, cutEnd-end)
 			cutEnd -= trimRight
 			excess -= trimRight
 		}
 		if excess > 0 {
-			cutStart += minInt(excess, start-cutStart)
+			cutStart += min(excess, start-cutStart)
 		}
 	}
 
@@ -823,11 +823,4 @@ func hasDotSegment(path string) bool {
 		}
 	}
 	return false
-}
-
-func minInt(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }

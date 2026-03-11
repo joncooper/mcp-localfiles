@@ -655,20 +655,6 @@ func boolToWord(b bool) string {
 	return "disabled"
 }
 
-func truncate(value string, max int) string {
-	if max <= 0 {
-		return ""
-	}
-	if runeWidth(value) <= max {
-		padding := strings.Repeat(" ", max-runeWidth(value))
-		return value + padding
-	}
-	if max <= 3 {
-		return truncateRunes(value, max)
-	}
-	return truncateRunes(value, max)
-}
-
 func wrapText(value string, max int) []string {
 	if max <= 0 {
 		return []string{""}
@@ -730,11 +716,4 @@ func clampViewport(selected, current, window int, total int) int {
 		return clamp(selected-window+1, 0, total-1)
 	}
 	return current
-}
-
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
 }

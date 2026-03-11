@@ -809,6 +809,7 @@ func postMCP(t *testing.T, srv *MCPServer, body []byte) *httptest.ResponseRecord
 	req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+testToken)
+	req.Header.Set("MCP-Protocol-Version", "2025-06-18")
 	resp := httptest.NewRecorder()
 	srv.ServeHTTP(resp, req)
 	return resp
@@ -819,6 +820,7 @@ func postMCPWithHeaders(t *testing.T, srv *MCPServer, body []byte, headers map[s
 	req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+testToken)
+	req.Header.Set("MCP-Protocol-Version", "2025-06-18")
 	for key, value := range headers {
 		req.Header.Set(key, value)
 	}
