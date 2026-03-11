@@ -157,16 +157,17 @@ func (s *MCPServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		})
 	}()
 
-	if r.Method != http.MethodPost {
+	s.addSecurityHeaders(rw)
+
+	if r.Method != http.MethodPost && r.Method != http.MethodGet {
 		rw.WriteHeader(http.StatusMethodNotAllowed)
 		_, _ = rw.Write([]byte("method not allowed"))
 		method = "http"
-		details = "method must be POST"
+		details = "method must be POST or GET"
 		errMsg = "method not allowed"
 		return
 	}
 
-	s.addSecurityHeaders(rw)
 	if !s.originAllowed(r.Header.Get("Origin")) {
 		rw.WriteHeader(http.StatusForbidden)
 		_, _ = rw.Write([]byte("forbidden"))
