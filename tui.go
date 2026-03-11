@@ -579,14 +579,13 @@ func (d *MCPDashboard) recordEvent(evt MCPEvent) {
 	}
 	d.events = append(d.events, evt)
 	d.reqCount++
-	if evt.Status >= 400 {
+	if evt.Status >= 400 || evt.Error != "" {
 		d.errCount++
+	} else {
+		d.okCount++
 	}
 	if evt.Status == 401 {
 		d.unauth++
-	}
-	if evt.Error == "" {
-		d.okCount++
 	}
 	if d.selected == -1 {
 		d.selected = len(d.events) - 1
