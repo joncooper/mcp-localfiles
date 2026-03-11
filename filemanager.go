@@ -402,7 +402,7 @@ func (m *FileManager) SearchFiles(path string, opts SearchOptions) ([]SearchMatc
 			return errSearchLimitReached
 		}
 
-		fileMatches, findErr := m.searchInFile(current, rel, searcher, remaining, regexDeadline, opts.Regex)
+		fileMatches, findErr := m.searchInFile(current, rel, searcher, remaining, regexDeadline, opts.Regex, maxBytesPerFile)
 		if findErr != nil {
 			if errors.Is(findErr, errSearchRegexTimeout) {
 				return findErr
@@ -486,7 +486,7 @@ func (m *FileManager) makeSearchMatcher(query string, caseSensitive, useRegex bo
 	}, nil
 }
 
-func (m *FileManager) searchInFile(absPath string, relPath string, matcher func(string) []int, remaining int, regexDeadline time.Time, regexMode bool) ([]SearchMatch, error) {
+func (m *FileManager) searchInFile(absPath string, relPath string, matcher func(string) []int, remaining int, regexDeadline time.Time, regexMode bool, maxBytesPerFile int64) ([]SearchMatch, error) {
 	f, err := os.Open(absPath)
 	if err != nil {
 		return nil, err
@@ -505,8 +505,19 @@ func (m *FileManager) searchInFile(absPath string, relPath string, matcher func(
 		return nil, seekErr
 	}
 
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 64*1024), 1<<20)
+	// Make sure the max token size is at least as large as the configured max bytes per file
+	// or 1MB minimum.
+	maxToken := int(maxBytesPerFile)
+	if maxToken < 1<<20 {
+		maxToken = 1 << 20
+	}
+	// Cap token size strictly to configured limit plus some buffer
+	if maxToken > int(maxBytesPerFile)+4096 {
+		maxToken = int(maxBytesPerFile) + 4096
+	}
+
+	scanner := bufio.NewScanner(io.LimitReader(f, maxBytesPerFile))
+	scanner.Buffer(make([]byte, 64*1024), maxToken)
 	lineNo := 1
 	var matches []SearchMatch
 
