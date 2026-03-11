@@ -571,13 +571,15 @@ func (d *MCPDashboard) recordEvent(evt MCPEvent) {
 	defer d.mu.Unlock()
 
 	if len(d.events) >= tuiLogCapacity {
-		d.events = d.events[1:]
+		copy(d.events, d.events[1:])
+		d.events[len(d.events)-1] = evt
 		if d.selected > 0 {
 			d.selected--
 		}
 		d.viewport--
+	} else {
+		d.events = append(d.events, evt)
 	}
-	d.events = append(d.events, evt)
 	d.reqCount++
 	if evt.Status >= 400 || evt.Error != "" {
 		d.errCount++
