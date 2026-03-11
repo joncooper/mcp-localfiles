@@ -137,6 +137,12 @@ func (m *FileManager) List(path string, recursive bool) ([]FileEntry, error) {
 	if recursive {
 		err = filepath.WalkDir(baseAbs, func(path string, d fs.DirEntry, err error) error {
 			if err != nil {
+				if os.IsPermission(err) {
+					if d != nil && d.IsDir() {
+						return filepath.SkipDir
+					}
+					return nil
+				}
 				return err
 			}
 			if path == baseAbs {
@@ -336,6 +342,12 @@ func (m *FileManager) SearchFiles(path string, opts SearchOptions) ([]SearchMatc
 
 	err = filepath.WalkDir(baseAbs, func(current string, d os.DirEntry, walkErr error) error {
 		if walkErr != nil {
+			if os.IsPermission(walkErr) {
+				if d != nil && d.IsDir() {
+					return filepath.SkipDir
+				}
+				return nil
+			}
 			return walkErr
 		}
 
