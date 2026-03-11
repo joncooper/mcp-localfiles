@@ -253,12 +253,17 @@ func (m *FileManager) ReadFile(path string, maxBytes int64) (*ReadFileResult, er
 	defer f.Close()
 
 	limit := maxBytes
-	if info.Size() < limit {
-		limit = info.Size()
-	}
-	raw, err := io.ReadAll(io.LimitReader(f, limit))
+	
+	// Read up to limit + 1 to determine if the file was truncated
+	raw, err := io.ReadAll(io.LimitReader(f, limit+1))
 	if err != nil {
 		return nil, err
+	}
+	
+	truncated := false
+	if int64(len(raw)) > limit {
+		truncated = true
+		raw = raw[:limit]
 	}
 
 	return &ReadFileResult{
@@ -267,7 +272,7 @@ func (m *FileManager) ReadFile(path string, maxBytes int64) (*ReadFileResult, er
 		ModTimeUTC: info.ModTime().UTC().Format(time.RFC3339),
 		Content:    string(raw),
 		IsText:     utf8.Valid(raw),
-		Truncated:  info.Size() > int64(limit),
+		Truncated:  truncated,
 	}, nil
 }
 
