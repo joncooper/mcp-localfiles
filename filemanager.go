@@ -32,6 +32,7 @@ var errSearchRegexTimeout = errors.New("regex search timed out")
 
 type FileManager struct {
 	rootAbs        string
+	rootReal       string
 	excludeDot     bool
 	excludePattern *regexp.Regexp
 }
@@ -62,14 +63,14 @@ type SearchMatch struct {
 }
 
 type SearchOptions struct {
-	Query           string
-	CaseSensitive   bool
+	Query            string
+	CaseSensitive    bool
 	CaseSensitiveSet bool
-	Regex           bool
-	FileGlob        string
-	MaxMatches      int
-	MaxBytesPerFile int64
-	RegexTimeout    time.Duration
+	Regex            bool
+	FileGlob         string
+	MaxMatches       int
+	MaxBytesPerFile  int64
+	RegexTimeout     time.Duration
 }
 
 func NewFileManager(root string, excludeDot bool, excludeRegex string) (*FileManager, error) {
@@ -87,6 +88,14 @@ func NewFileManager(root string, excludeDot bool, excludeRegex string) (*FileMan
 	if !info.IsDir() {
 		return nil, errors.New("root must be a directory")
 	}
+	realRoot, err := filepath.EvalSymlinks(absRoot)
+	if err != nil {
+		return nil, fmt.Errorf("resolve root symlinks: %w", err)
+	}
+	realRoot, err = filepath.Abs(realRoot)
+	if err != nil {
+		return nil, fmt.Errorf("resolve real root: %w", err)
+	}
 
 	var excludePattern *regexp.Regexp
 	if strings.TrimSpace(excludeRegex) != "" {
@@ -98,6 +107,7 @@ func NewFileManager(root string, excludeDot bool, excludeRegex string) (*FileMan
 
 	return &FileManager{
 		rootAbs:        absRoot,
+		rootReal:       realRoot,
 		excludeDot:     excludeDot,
 		excludePattern: excludePattern,
 	}, nil
@@ -130,12 +140,18 @@ func (m *FileManager) List(path string, recursive bool) ([]FileEntry, error) {
 			if path == baseAbs {
 				return nil
 			}
-			rel, err := filepath.Rel(m.rootAbs, path)
+			rel, err := filepath.Rel(m.rootReal, path)
 			if err != nil {
 				return err
 			}
 			rel = filepath.ToSlash(filepath.Clean(rel))
 
+			if _, err := m.validateResolvedPath(path, rel); err != nil {
+				if d.IsDir() {
+					return filepath.SkipDir
+				}
+				return nil
+			}
 			if m.shouldExclude(rel) {
 				if d.IsDir() {
 					return filepath.SkipDir
@@ -169,6 +185,10 @@ func (m *FileManager) List(path string, recursive bool) ([]FileEntry, error) {
 			rel := entry.Name()
 			if relToRoot != "." {
 				rel = filepath.ToSlash(filepath.Join(relToRoot, entry.Name()))
+			}
+			entryAbs := filepath.Join(baseAbs, entry.Name())
+			if _, err := m.validateResolvedPath(entryAbs, rel); err != nil {
+				continue
 			}
 			if m.shouldExclude(rel) {
 				continue
@@ -317,13 +337,19 @@ func (m *FileManager) SearchFiles(path string, opts SearchOptions) ([]SearchMatc
 			return walkErr
 		}
 
-		rel, relErr := filepath.Rel(m.rootAbs, current)
+		rel, relErr := filepath.Rel(m.rootReal, current)
 		if relErr != nil {
 			return relErr
 		}
 		rel = filepath.ToSlash(filepath.Clean(rel))
 
 		if rel == "." {
+			return nil
+		}
+		if _, err := m.validateResolvedPath(current, rel); err != nil {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 		if m.shouldExclude(rel) {
@@ -713,7 +739,40 @@ func (m *FileManager) resolveAndValidate(path string) (abs string, rel string, e
 	if relToRoot == ".." || strings.HasPrefix(relToRoot, ".."+string(filepath.Separator)) || strings.HasPrefix(relToRoot, string(filepath.Separator)) {
 		return "", "", errors.New("path traversal blocked")
 	}
-	return candidate, filepath.ToSlash(relToRoot), nil
+	relToRoot = filepath.ToSlash(relToRoot)
+	resolved, err := m.validateResolvedPath(candidate, relToRoot)
+	if err != nil {
+		return "", "", err
+	}
+	return resolved, relToRoot, nil
+}
+
+func (m *FileManager) validateResolvedPath(candidate string, rel string) (string, error) {
+	resolved, err := filepath.EvalSymlinks(candidate)
+	if err != nil {
+		return "", err
+	}
+	resolved, err = filepath.Abs(resolved)
+	if err != nil {
+		return "", err
+	}
+
+	relToRoot, err := filepath.Rel(m.rootReal, resolved)
+	if err != nil {
+		return "", err
+	}
+	if relToRoot == ".." || strings.HasPrefix(relToRoot, ".."+string(filepath.Separator)) || strings.HasPrefix(relToRoot, string(filepath.Separator)) {
+		return "", errors.New("path escapes root via symlink")
+	}
+
+	expected := m.rootReal
+	if rel != "." {
+		expected = filepath.Join(m.rootReal, filepath.FromSlash(rel))
+	}
+	if resolved != expected {
+		return "", errors.New("symlinks are not allowed")
+	}
+	return resolved, nil
 }
 
 func (m *FileManager) shouldExclude(relPath string) bool {

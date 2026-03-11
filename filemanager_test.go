@@ -104,6 +104,72 @@ func TestFileManagerTraversalBlocked(t *testing.T) {
 	}
 }
 
+func TestFileManagerReadFileRejectsSymlinkEscape(t *testing.T) {
+	root := t.TempDir()
+	outsideDir := t.TempDir()
+	target := filepath.Join(outsideDir, "secret.txt")
+	if err := os.WriteFile(target, []byte("secret"), 0o644); err != nil {
+		t.Fatalf("write target: %v", err)
+	}
+	mustSymlinkOrSkip(t, target, filepath.Join(root, "secret-link.txt"))
+
+	manager, err := NewFileManager(root, true, "")
+	if err != nil {
+		t.Fatalf("new manager: %v", err)
+	}
+
+	if _, err := manager.ReadFile("secret-link.txt", 64); err == nil {
+		t.Fatalf("expected symlink escape to be rejected")
+	}
+}
+
+func TestFileManagerListRejectsSymlinkDirectoryEscape(t *testing.T) {
+	root := t.TempDir()
+	outsideDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outsideDir, "secret.txt"), []byte("secret"), 0o644); err != nil {
+		t.Fatalf("write target: %v", err)
+	}
+	mustSymlinkOrSkip(t, outsideDir, filepath.Join(root, "outside"))
+
+	manager, err := NewFileManager(root, true, "")
+	if err != nil {
+		t.Fatalf("new manager: %v", err)
+	}
+
+	if _, err := manager.List("outside", false); err == nil {
+		t.Fatalf("expected symlinked directory outside root to be rejected")
+	}
+}
+
+func TestFileManagerSearchFilesSkipsSymlinkedFilesOutsideRoot(t *testing.T) {
+	root := t.TempDir()
+	outsideDir := t.TempDir()
+	target := filepath.Join(outsideDir, "secret.txt")
+	if err := os.WriteFile(target, []byte("needle outside root"), 0o644); err != nil {
+		t.Fatalf("write target: %v", err)
+	}
+	mustSymlinkOrSkip(t, target, filepath.Join(root, "secret-link.txt"))
+
+	manager, err := NewFileManager(root, true, "")
+	if err != nil {
+		t.Fatalf("new manager: %v", err)
+	}
+
+	matches, truncated, err := manager.SearchFiles(".", SearchOptions{
+		Query:      "needle",
+		MaxMatches: 10,
+	})
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if truncated {
+		t.Fatalf("expected no truncation")
+	}
+	if len(matches) != 0 {
+		t.Fatalf("expected outside-root symlink target to be skipped, got %d matches", len(matches))
+	}
+}
+
 func TestFileManagerReadFileTruncates(t *testing.T) {
 	root := t.TempDir()
 	content := "abcdefghijklmnopqrstuvwxyz"
@@ -248,5 +314,12 @@ func TestTruncateLineForMatch(t *testing.T) {
 	}
 	if len(snippet) > defaultSearchTruncateLineLen+2 {
 		t.Fatalf("expected snippet within max length, got %d", len(snippet))
+	}
+}
+
+func mustSymlinkOrSkip(t *testing.T, target string, link string) {
+	t.Helper()
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlink unsupported in test environment: %v", err)
 	}
 }

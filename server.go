@@ -8,13 +8,22 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
 
 const (
-	rpcVersion = "2.0"
+	rpcVersion               = "2.0"
+	mcpProtocolVersionLatest = "2025-11-25"
 )
+
+var supportedMCPProtocolVersions = map[string]struct{}{
+	"2024-11-05": {},
+	"2025-03-26": {},
+	"2025-06-18": {},
+	"2025-11-25": {},
+}
 
 type MCPConfig struct {
 	Root            string
@@ -22,6 +31,7 @@ type MCPConfig struct {
 	ExcludeDotfiles bool
 	ExcludeRegex    string
 	MaxFileBytes    int64
+	AllowedOrigins  []string
 	OnEvent         func(MCPEvent)
 }
 
@@ -76,11 +86,18 @@ type ToolResult struct {
 	Content []ToolContent `json:"content"`
 }
 
+type InitializeParams struct {
+	ProtocolVersion string                 `json:"protocolVersion"`
+	Capabilities    map[string]interface{} `json:"capabilities,omitempty"`
+	ClientInfo      map[string]interface{} `json:"clientInfo,omitempty"`
+}
+
 type MCPServer struct {
-	fileManager *FileManager
-	authToken   string
-	maxFileSize int64
-	onEvent     func(MCPEvent)
+	fileManager    *FileManager
+	authToken      string
+	maxFileSize    int64
+	allowedOrigins map[string]struct{}
+	onEvent        func(MCPEvent)
 }
 
 func NewMCPServer(cfg MCPConfig) (*MCPServer, error) {
@@ -95,11 +112,16 @@ func NewMCPServer(cfg MCPConfig) (*MCPServer, error) {
 	if maxFileSize <= 0 {
 		maxFileSize = defaultMaxFileBytes
 	}
+	allowedOrigins, err := normalizeAllowedOrigins(cfg.AllowedOrigins)
+	if err != nil {
+		return nil, fmt.Errorf("normalize allowed origins: %w", err)
+	}
 	return &MCPServer{
-		fileManager: manager,
-		authToken:   cfg.AuthToken,
-		maxFileSize: maxFileSize,
-		onEvent:     cfg.OnEvent,
+		fileManager:    manager,
+		authToken:      cfg.AuthToken,
+		maxFileSize:    maxFileSize,
+		allowedOrigins: allowedOrigins,
+		onEvent:        cfg.OnEvent,
 	}, nil
 }
 
@@ -145,6 +167,14 @@ func (s *MCPServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.addSecurityHeaders(rw)
+	if !s.originAllowed(r.Header.Get("Origin")) {
+		rw.WriteHeader(http.StatusForbidden)
+		_, _ = rw.Write([]byte("forbidden"))
+		method = "origin"
+		details = "origin validation failed"
+		errMsg = "forbidden"
+		return
+	}
 	authorized = s.authorize(r)
 	if !authorized {
 		rw.Header().Set("WWW-Authenticate", "Bearer")
@@ -184,9 +214,16 @@ func (s *MCPServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	switch method {
 	case "initialize":
+		protocolVersion, err := negotiateProtocolVersion(req.Params)
+		if err != nil {
+			details = "initialize handshake rejected"
+			errMsg = err.Error()
+			writeRPCError(rw, req.ID, -32602, errMsg)
+			return
+		}
 		details = "initialize handshake"
 		writeRPCResult(rw, req.ID, map[string]interface{}{
-			"protocolVersion": rpcVersion,
+			"protocolVersion": protocolVersion,
 			"capabilities": map[string]interface{}{
 				"tools": map[string]bool{"listChanged": false},
 			},
@@ -197,7 +234,7 @@ func (s *MCPServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		})
 	case "notifications/initialized":
 		details = "notifications/initialized"
-		rw.WriteHeader(http.StatusNoContent)
+		rw.WriteHeader(http.StatusAccepted)
 	case "tools/list":
 		details = "tools/list"
 		tools := []MCPTool{
@@ -301,6 +338,26 @@ func (s *MCPServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func negotiateProtocolVersion(rawParams json.RawMessage) (string, error) {
+	if len(rawParams) == 0 {
+		return "", errors.New("missing required initialize argument: protocolVersion")
+	}
+
+	var params InitializeParams
+	if err := json.Unmarshal(rawParams, &params); err != nil {
+		return "", errors.New("invalid initialize params")
+	}
+
+	requested := strings.TrimSpace(params.ProtocolVersion)
+	if requested == "" {
+		return "", errors.New("missing required initialize argument: protocolVersion")
+	}
+	if _, ok := supportedMCPProtocolVersions[requested]; ok {
+		return requested, nil
+	}
+	return mcpProtocolVersionLatest, nil
+}
+
 func (s *MCPServer) callTool(rawParams json.RawMessage) (ToolResult, string, string, error) {
 	if len(rawParams) == 0 {
 		return ToolResult{}, "-", "missing params", errors.New("missing params")
@@ -320,8 +377,14 @@ func (s *MCPServer) callTool(rawParams json.RawMessage) (ToolResult, string, str
 				return ToolResult{}, params.Name, "invalid args for list_files", errors.New("invalid args for list_files")
 			}
 		}
-		path := getStringArg(args, "path", ".")
-		recursive := getBoolArg(args, "recursive", false)
+		path, err := getOptionalStringArg(args, "path", ".")
+		if err != nil {
+			return ToolResult{}, params.Name, "invalid path argument", errors.New("invalid path argument")
+		}
+		recursive, err := getOptionalBoolArg(args, "recursive", false)
+		if err != nil {
+			return ToolResult{}, params.Name, "invalid recursive argument", errors.New("invalid recursive argument")
+		}
 		entries, err := s.fileManager.List(path, recursive)
 		if err != nil {
 			return ToolResult{}, params.Name, fmt.Sprintf("list_files path=%q recursive=%t", path, recursive), err
@@ -350,11 +413,11 @@ func (s *MCPServer) callTool(rawParams json.RawMessage) (ToolResult, string, str
 		}
 		maxBytes := s.maxFileSize
 		if raw, ok := args["max_bytes"]; ok {
-			if n, ok := raw.(float64); ok && n > 0 {
-				maxBytes = int64(n)
-			} else {
+			n, err := getPositiveInt64Arg(raw, s.maxFileSize)
+			if err != nil {
 				return ToolResult{}, params.Name, "invalid max_bytes argument", errors.New("invalid max_bytes argument")
 			}
+			maxBytes = n
 		}
 		file, err := s.fileManager.ReadFile(pathStr, maxBytes)
 		if err != nil {
@@ -442,13 +505,13 @@ func (s *MCPServer) callTool(rawParams json.RawMessage) (ToolResult, string, str
 		}
 
 		matches, truncated, err := s.fileManager.SearchFiles(path, SearchOptions{
-			Query:           query,
-			CaseSensitive:   caseSensitive,
+			Query:            query,
+			CaseSensitive:    caseSensitive,
 			CaseSensitiveSet: true,
-			Regex:           useRegex,
-			FileGlob:        fileGlob,
-			MaxMatches:      maxMatches,
-			MaxBytesPerFile: int64(maxBytesPerFile),
+			Regex:            useRegex,
+			FileGlob:         fileGlob,
+			MaxMatches:       maxMatches,
+			MaxBytesPerFile:  int64(maxBytesPerFile),
 		})
 		if err != nil {
 			return ToolResult{}, params.Name, fmt.Sprintf("search_files path=%q query=%q", path, query), err
@@ -496,22 +559,46 @@ func getIntArg(args map[string]interface{}, key string, fallback int, min int, m
 	return value, nil
 }
 
-func getStringArg(args map[string]interface{}, key, fallback string) string {
-	if raw, ok := args[key]; ok {
-		if v, ok := raw.(string); ok {
-			return v
-		}
+func getPositiveInt64Arg(raw interface{}, max int64) (int64, error) {
+	number, ok := raw.(float64)
+	if !ok {
+		return 0, errors.New("must be a number")
 	}
-	return fallback
+	if number != float64(int64(number)) {
+		return 0, errors.New("must be an integer")
+	}
+	value := int64(number)
+	if value <= 0 {
+		return 0, errors.New("must be positive")
+	}
+	if value > max {
+		return 0, errors.New("out of allowed range")
+	}
+	return value, nil
 }
 
-func getBoolArg(args map[string]interface{}, key string, fallback bool) bool {
-	if raw, ok := args[key]; ok {
-		if v, ok := raw.(bool); ok {
-			return v
-		}
+func getOptionalStringArg(args map[string]interface{}, key, fallback string) (string, error) {
+	raw, ok := args[key]
+	if !ok {
+		return fallback, nil
 	}
-	return fallback
+	value, ok := raw.(string)
+	if !ok {
+		return fallback, errors.New("must be a string")
+	}
+	return value, nil
+}
+
+func getOptionalBoolArg(args map[string]interface{}, key string, fallback bool) (bool, error) {
+	raw, ok := args[key]
+	if !ok {
+		return fallback, nil
+	}
+	value, ok := raw.(bool)
+	if !ok {
+		return fallback, errors.New("must be a boolean")
+	}
+	return value, nil
 }
 
 func writeRPCResult(w http.ResponseWriter, id json.RawMessage, result interface{}) {
@@ -556,12 +643,65 @@ func (s *MCPServer) authorize(r *http.Request) bool {
 	return subtle.ConstantTimeCompare([]byte(given), []byte(s.authToken)) == 1
 }
 
+func (s *MCPServer) originAllowed(origin string) bool {
+	if strings.TrimSpace(origin) == "" {
+		return true
+	}
+	normalized, err := normalizeOrigin(origin)
+	if err != nil {
+		return false
+	}
+	if _, ok := s.allowedOrigins[normalized]; ok {
+		return true
+	}
+	parsed, err := url.Parse(normalized)
+	if err != nil {
+		return false
+	}
+	host := strings.ToLower(parsed.Hostname())
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
 func (s *MCPServer) addSecurityHeaders(w http.ResponseWriter) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Pragma", "no-cache")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("X-Frame-Options", "DENY")
 	w.Header().Set("Referrer-Policy", "no-referrer")
+}
+
+func normalizeAllowedOrigins(origins []string) (map[string]struct{}, error) {
+	normalized := make(map[string]struct{}, len(origins))
+	for _, origin := range origins {
+		value := strings.TrimSpace(origin)
+		if value == "" {
+			continue
+		}
+		key, err := normalizeOrigin(value)
+		if err != nil {
+			return nil, err
+		}
+		normalized[key] = struct{}{}
+	}
+	return normalized, nil
+}
+
+func normalizeOrigin(raw string) (string, error) {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return "", err
+	}
+	if parsed.Scheme == "" || parsed.Host == "" || parsed.Opaque != "" {
+		return "", errors.New("origin must include scheme and host")
+	}
+	if parsed.User != nil || parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return "", errors.New("origin must not include userinfo, path, query, or fragment")
+	}
+	return strings.ToLower(parsed.Scheme) + "://" + strings.ToLower(parsed.Host), nil
 }
 
 func extractClientAddr(raw string) string {

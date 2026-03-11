@@ -9,6 +9,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -177,6 +178,7 @@ func run() error {
 		ExcludeDotfiles: cfg.ExcludeDotfiles,
 		ExcludeRegex:    mergeExcludePattern(cfg.Exclude, cfg.ExcludeRegex),
 		MaxFileBytes:    cfg.MaxFileBytes,
+		AllowedOrigins:  buildExplicitAllowedOrigins(remoteURL),
 		OnEvent:         onEvent,
 	})
 	if err != nil {
@@ -613,6 +615,29 @@ func formatMCPInstructionEndpoint(exposed bool, remoteURL string, listenArg stri
 		return "<local-endpoint>"
 	}
 	return fmt.Sprintf("http://%s/mcp", listenArg)
+}
+
+func buildExplicitAllowedOrigins(remoteURL string) []string {
+	origin, err := originFromURL(remoteURL)
+	if err != nil || origin == "" {
+		return nil
+	}
+	return []string{origin}
+}
+
+func originFromURL(raw string) (string, error) {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return "", nil
+	}
+	parsed, err := url.Parse(value)
+	if err != nil {
+		return "", err
+	}
+	if parsed.Scheme == "" || parsed.Host == "" {
+		return "", errors.New("url must include scheme and host")
+	}
+	return fmt.Sprintf("%s://%s", strings.ToLower(parsed.Scheme), strings.ToLower(parsed.Host)), nil
 }
 
 func mergeExcludePattern(exclude string, excludeRegex string) string {
