@@ -301,7 +301,7 @@ func (s *MCPServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 						},
 						"file_glob": map[string]interface{}{
 							"type":        "string",
-							"description": "Optional glob filter for matched files (e.g. \"*.go\")",
+							"description": "Optional glob filter for matched files. Use ** for recursive matching (e.g. \"**/*.go\") and * for single-directory matching.",
 						},
 						"max_matches": map[string]interface{}{
 							"type":        "integer",

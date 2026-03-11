@@ -1,8 +1,41 @@
 # Open Findings
 
-None.
+## 7. Low: Security headers not applied to non-POST responses
+
+The method check at `server.go:136` returns `405 Method Not Allowed` before `addSecurityHeaders` is called at line 144. Non-POST responses are missing `X-Content-Type-Options`, `X-Frame-Options`, `Cache-Control`, and other security headers.
+
+## 8. Low: `okCount` and `errCount` are not mutually exclusive
+
+In `tui.go:582–590`, `errCount` increments when `evt.Status >= 400` and `okCount` increments when `evt.Error == ""`. A 500 response with an empty `Error` field increments both counters. The dashboard presents these as complementary metrics but they can double-count the same event.
+
+## 9. Info: Dead code and redundant helpers
+
+- `truncate()` at `tui.go:671` is defined but never called; `padLine` covers the same logic.
+- `minInt()` at `filemanager.go:818` and `max()` at `tui.go:751` duplicate Go 1.21+ builtins available under the project's Go 1.24 toolchain.
+
+## 10. High: `SearchFiles` and recursive `List` abort entirely on the first file permission error
+
+If `os.Open` or `d.Info()` fails due to permissions on a single file, the `filepath.WalkDir` callback returns the error, terminating the entire search or listing instead of skipping the unreadable file. This makes the tool brittle in directories with mixed permissions.
+
+## 11. Low: Inefficient slice shifting in `MCPDashboard.recordEvent` causes frequent allocations
+
+`d.events = d.events[1:]` followed by `append` moves the slice window forward, forcing a reallocation every `tuiLogCapacity` events. A circular buffer or using `copy()` to shift elements in place would avoid these continuous allocations.
+
+## 12. Low: HTTP response status code is not explicitly captured for successful RPC responses
+
+In `server.go`, `mcpResponseWriter` wraps `http.ResponseWriter` to capture the status code. However, `writeRPCResult` calls `json.NewEncoder(w).Encode(resp)` without explicitly calling `WriteHeader`. This leaves `rw.status` as 0. The deferred logging function works around this by defaulting 0 to 200 OK, but relying on this default obscures cases where a 0 status might indicate a genuinely unwritten response.
+
+## 13. Low: `io.LimitReader` with file size ceiling truncates pseudo-files
+
+In `filemanager.go`, `limit := maxBytes` is clamped to `info.Size()`. For pseudo-files (like those in `/proc` or `/sys`) which often report a size of 0 despite having content, this will result in reading 0 bytes and returning an empty string. While this tool primarily targets standard local files, this remains a limitation.
 
 # Closed Findings
+
+## 6. High: `file_glob` filter does not match files in subdirectories
+
+- Resolved by switching to `github.com/bmatcuk/doublestar/v4`, enabling `**/*.go` globstar matches for recursive traversal.
+- Updated tool description to inform clients to use `**` for recursive searches.
+- Regression tests added to verify globstar functionality.
 
 ## 1. High: Root confinement is bypassable via symlinks
 

@@ -229,6 +229,56 @@ func TestFileManagerSearchFiles(t *testing.T) {
 	}
 }
 
+func TestFileManagerSearchFilesDoublestar(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "src", "nested"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "src", "nested", "main.go"), []byte("package main\nfunc main() {}\n// find_me"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "src", "other.txt"), []byte("find_me too"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+
+	manager, err := NewFileManager(root, true, "")
+	if err != nil {
+		t.Fatalf("new manager: %v", err)
+	}
+
+	t.Run("match all go files", func(t *testing.T) {
+		matches, _, err := manager.SearchFiles(".", SearchOptions{
+			Query:    "find_me",
+			FileGlob: "**/*.go",
+		})
+		if err != nil {
+			t.Fatalf("search: %v", err)
+		}
+		if len(matches) != 1 {
+			t.Fatalf("expected 1 match, got %d", len(matches))
+		}
+		if matches[0].Path != filepath.ToSlash(filepath.Join("src", "nested", "main.go")) {
+			t.Fatalf("expected match in src/nested/main.go, got %q", matches[0].Path)
+		}
+	})
+
+	t.Run("match text files", func(t *testing.T) {
+		matches, _, err := manager.SearchFiles(".", SearchOptions{
+			Query:    "find_me",
+			FileGlob: "**/*.txt",
+		})
+		if err != nil {
+			t.Fatalf("search: %v", err)
+		}
+		if len(matches) != 1 {
+			t.Fatalf("expected 1 match, got %d", len(matches))
+		}
+		if matches[0].Path != filepath.ToSlash(filepath.Join("src", "other.txt")) {
+			t.Fatalf("expected match in src/other.txt, got %q", matches[0].Path)
+		}
+	})
+}
+
 func TestFileManagerSearchFilesRejectsInvalidQuery(t *testing.T) {
 	root := t.TempDir()
 	manager, err := NewFileManager(root, true, "")

@@ -14,6 +14,8 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/bmatcuk/doublestar/v4"
 )
 
 const (
@@ -362,7 +364,7 @@ func (m *FileManager) SearchFiles(path string, opts SearchOptions) ([]SearchMatc
 			return nil
 		}
 		if fileGlob != "" {
-			matchesPattern, matchErr := filepath.Match(filepath.FromSlash(fileGlob), filepath.FromSlash(rel))
+			matchesPattern, matchErr := doublestar.Match(filepath.ToSlash(fileGlob), rel)
 			if matchErr != nil {
 				return matchErr
 			}
@@ -651,8 +653,8 @@ func validateFileGlobPattern(pattern string) error {
 			return errors.New("glob pattern contains forbidden '..' segment")
 		}
 	}
-	patternToMatch := filepath.FromSlash(pattern)
-	_, err := filepath.Match(patternToMatch, "sample.txt")
+	patternToMatch := filepath.ToSlash(pattern)
+	_, err := doublestar.Match(patternToMatch, "sample.txt")
 	if err != nil {
 		return err
 	}
