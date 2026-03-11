@@ -428,6 +428,11 @@ func (m *FileManager) SearchFiles(path string, opts SearchOptions) ([]SearchMatc
 }
 
 func (m *FileManager) makeSearchMatcher(query string, caseSensitive, useRegex bool) (func(string) []int, error) {
+	if !useRegex && !caseSensitive {
+		useRegex = true
+		query = regexp.QuoteMeta(query)
+	}
+
 	if useRegex {
 		pattern := query
 		if !caseSensitive {
@@ -453,25 +458,16 @@ func (m *FileManager) makeSearchMatcher(query string, caseSensitive, useRegex bo
 		}, nil
 	}
 
-	var queryText string
-	if caseSensitive {
-		queryText = query
-	} else {
-		queryText = strings.ToLower(query)
-	}
+	queryText := query
 
 	return func(line string) []int {
-		needle := line
-		if !caseSensitive {
-			needle = strings.ToLower(line)
-		}
 		if queryText == "" {
 			return nil
 		}
 		var locs []int
 		offset := 0
 		for {
-			idx := strings.Index(needle[offset:], queryText)
+			idx := strings.Index(line[offset:], queryText)
 			if idx < 0 {
 				break
 			}
@@ -482,7 +478,7 @@ func (m *FileManager) makeSearchMatcher(query string, caseSensitive, useRegex bo
 			if len(locs)/2 >= searchMaxMatchesPerLine {
 				break
 			}
-			if offset >= len(needle) {
+			if offset >= len(line) {
 				break
 			}
 		}
