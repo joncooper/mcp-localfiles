@@ -22,7 +22,7 @@ func TestFileManagerListSkipsUnreadableDirectoryDuringRecursiveWalk(t *testing.T
 		t.Fatalf("new manager: %v", err)
 	}
 
-	entries, err := manager.List(".", true)
+	entries, err := manager.List(".", true, "")
 	if err != nil {
 		t.Fatalf("expected recursive list to skip unreadable entries, got error: %v", err)
 	}

@@ -536,9 +536,15 @@ func buildAppleSandboxProfile(rootDir, executablePath, tailscalePath string) str
 	_, _ = b.WriteString(strconv.Quote(executablePath))
 	_, _ = b.WriteString(")\n       (subpath ")
 	_, _ = b.WriteString(strconv.Quote(rootDir))
+	_, _ = b.WriteString(")\n       (subpath ")
+	_, _ = b.WriteString(strconv.Quote("/dev"))
 	_, _ = b.WriteString("))\n\n")
 
 	_, _ = b.WriteString("(allow file-write* (subpath ")
+	_, _ = b.WriteString(strconv.Quote("/dev"))
+	_, _ = b.WriteString("))\n\n")
+
+	_, _ = b.WriteString("(allow file-ioctl (subpath ")
 	_, _ = b.WriteString(strconv.Quote("/dev"))
 	_, _ = b.WriteString("))\n\n")
 

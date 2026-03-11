@@ -4,7 +4,7 @@ Minimal MCP server in Go that exposes a local filesystem directory through HTTP 
 
 ## Features
 
-- `list_files` and `read_file` MCP tools
+- `list_files`, `read_file`, and `search_files` MCP tools
 - Path traversal protection (`..` and absolute paths are rejected)
 - Optional dotfile and regex-based exclusion
 - `--exclude` alias for regex-based exclusion (combined with `--exclude-regex` when both are set)
@@ -113,9 +113,18 @@ Supported methods:
   - Tool `list_files`:
     - `path` (string, default `.`)
     - `recursive` (bool, default `false`)
+    - `glob` (string, optional) — filter results by glob pattern (e.g. `*.go`, `**/*.test.js`). Implies recursive when set.
   - Tool `read_file`:
     - `path` (string, required)
     - `max_bytes` (int, default from `--max-file-bytes`)
+    - `offset` (int, optional) — 1-based starting line number for partial reads
+    - `limit` (int, optional) — maximum number of lines to return
+  - Tool `search_files`:
+    - `path` (string, default `.`) — directory to search within
+    - `query` (string, required) — text to search for
+    - `case_sensitive` (bool, default `true`)
+    - `max_matches` (int, default `100`)
+    - `max_bytes_per_file` (int, optional) — skip files larger than this
 
 ## ChatGPT setup instructions
 
@@ -125,7 +134,7 @@ Supported methods:
    - Remote URL: `https://<your-tailnet-hostname>/mcp`
    - Header: `Authorization: Bearer <token>`
 
-3. Use tools `list_files` and `read_file`.
+3. Use tools `list_files`, `read_file`, and `search_files`.
 
 The token displayed at startup in the dashboard is generated if you don't provide one.
 

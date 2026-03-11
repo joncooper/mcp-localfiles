@@ -255,7 +255,7 @@ func (s *MCPServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		tools := []MCPTool{
 			{
 				Name:        "list_files",
-				Description: "List directory entries from the configured root with safe filtering",
+				Description: "List directory entries from the configured root with safe filtering. Supports glob patterns (e.g. \"**/*.go\") for finding files by name across the tree.",
 				InputSchema: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -265,14 +265,18 @@ func (s *MCPServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 						},
 						"recursive": map[string]interface{}{
 							"type":        "boolean",
-							"description": "If true, recursively include nested files",
+							"description": "If true, recursively include nested files. Automatically enabled when glob is set.",
+						},
+						"glob": map[string]interface{}{
+							"type":        "string",
+							"description": "Glob pattern to filter results. Use ** for recursive matching (e.g. \"**/*.go\", \"src/**/*.ts\") and * for single-directory matching (e.g. \"*.json\"). When set, the walk is always recursive.",
 						},
 					},
 				},
 			},
 			{
 				Name:        "read_file",
-				Description: "Read file contents from the configured root",
+				Description: "Read file contents from the configured root. Supports line-based partial reads with offset and limit for efficiently reading portions of large files.",
 				InputSchema: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -282,7 +286,17 @@ func (s *MCPServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 						},
 						"max_bytes": map[string]interface{}{
 							"type":        "integer",
-							"description": "Override maximum returned bytes",
+							"description": "Override maximum returned bytes (only used when offset/limit are not set)",
+							"minimum":     1,
+						},
+						"offset": map[string]interface{}{
+							"type":        "integer",
+							"description": "Line number to start reading from (1-based). When set, activates line-based mode and the response includes totalLines, startLine, and endLine metadata.",
+							"minimum":     1,
+						},
+						"limit": map[string]interface{}{
+							"type":        "integer",
+							"description": "Maximum number of lines to return. Use with offset to read a specific range, e.g. offset=100, limit=50 reads lines 100-149.",
 							"minimum":     1,
 						},
 					},
@@ -400,17 +414,21 @@ func (s *MCPServer) callTool(rawParams json.RawMessage) (ToolResult, string, str
 		if err != nil {
 			return ToolResult{}, params.Name, "invalid recursive argument", errors.New("invalid recursive argument")
 		}
-		entries, err := s.fileManager.List(path, recursive)
+		glob, err := getOptionalStringArg(args, "glob", "")
 		if err != nil {
-			return ToolResult{}, params.Name, fmt.Sprintf("list_files path=%q recursive=%t", path, recursive), err
+			return ToolResult{}, params.Name, "invalid glob argument", errors.New("invalid glob argument")
+		}
+		entries, err := s.fileManager.List(path, recursive, glob)
+		if err != nil {
+			return ToolResult{}, params.Name, fmt.Sprintf("list_files path=%q recursive=%t glob=%q", path, recursive, glob), err
 		}
 		body, err := json.MarshalIndent(entries, "", "  ")
 		if err != nil {
-			return ToolResult{}, params.Name, fmt.Sprintf("list_files path=%q recursive=%t", path, recursive), err
+			return ToolResult{}, params.Name, fmt.Sprintf("list_files path=%q recursive=%t glob=%q", path, recursive, glob), err
 		}
 		return ToolResult{
 			Content: []ToolContent{{Type: "text", Text: string(body)}},
-		}, params.Name, fmt.Sprintf("list_files path=%q recursive=%t", path, recursive), nil
+		}, params.Name, fmt.Sprintf("list_files path=%q recursive=%t glob=%q", path, recursive, glob), nil
 	case "read_file":
 		args := map[string]interface{}{}
 		if len(params.Arguments) > 0 {
@@ -434,7 +452,15 @@ func (s *MCPServer) callTool(rawParams json.RawMessage) (ToolResult, string, str
 			}
 			maxBytes = n
 		}
-		file, err := s.fileManager.ReadFile(pathStr, maxBytes)
+		offset, err := getIntArg(args, "offset", 0, 1, 1<<30)
+		if err != nil {
+			return ToolResult{}, params.Name, "invalid offset argument", fmt.Errorf("invalid offset argument: %w", err)
+		}
+		lineLimit, err := getIntArg(args, "limit", 0, 1, 1<<30)
+		if err != nil {
+			return ToolResult{}, params.Name, "invalid limit argument", fmt.Errorf("invalid limit argument: %w", err)
+		}
+		file, err := s.fileManager.ReadFile(pathStr, maxBytes, offset, lineLimit)
 		if err != nil {
 			return ToolResult{}, params.Name, fmt.Sprintf("read_file path=%q", pathStr), err
 		}
@@ -444,22 +470,28 @@ func (s *MCPServer) callTool(rawParams json.RawMessage) (ToolResult, string, str
 			content = base64.StdEncoding.EncodeToString([]byte(file.Content))
 			encoding = "base64"
 		}
+		metadata := map[string]interface{}{
+			"path":       file.Path,
+			"size":       file.Size,
+			"modTimeUtc": file.ModTimeUTC,
+			"encoding":   encoding,
+			"truncated":  file.Truncated,
+		}
+		if file.TotalLines > 0 {
+			metadata["totalLines"] = file.TotalLines
+			metadata["startLine"] = file.StartLine
+			metadata["endLine"] = file.EndLine
+		}
 		payload := map[string]interface{}{
-			"metadata": map[string]interface{}{
-				"path":       file.Path,
-				"size":       file.Size,
-				"modTimeUtc": file.ModTimeUTC,
-				"encoding":   encoding,
-				"truncated":  file.Truncated,
-			},
-			"content": content,
+			"metadata": metadata,
+			"content":  content,
 		}
 		body, err := json.MarshalIndent(payload, "", "  ")
 		if err != nil {
 			return ToolResult{}, params.Name, fmt.Sprintf("read_file path=%q", pathStr), err
 		}
 		return ToolResult{Content: []ToolContent{{Type: "text", Text: string(body)}}},
-			params.Name, fmt.Sprintf("read_file path=%q max_bytes=%d", pathStr, maxBytes), nil
+			params.Name, fmt.Sprintf("read_file path=%q offset=%d limit=%d", pathStr, offset, lineLimit), nil
 	case "search_files":
 		args := map[string]interface{}{}
 		if len(params.Arguments) > 0 {

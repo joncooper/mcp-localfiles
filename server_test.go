@@ -828,3 +828,215 @@ func postMCPWithHeaders(t *testing.T, srv *MCPServer, body []byte, headers map[s
 	srv.ServeHTTP(resp, req)
 	return resp
 }
+
+// callToolMCP is a helper that sends a tools/call request and returns the parsed result text.
+func callToolMCP(t *testing.T, srv *MCPServer, toolName string, args map[string]interface{}) string {
+	t.Helper()
+	body := map[string]interface{}{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  "tools/call",
+		"params": map[string]interface{}{
+			"name":      toolName,
+			"arguments": args,
+		},
+	}
+	raw, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	resp := postMCP(t, srv, raw)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", resp.Code, resp.Body.String())
+	}
+	var rpcResp struct {
+		Result struct {
+			Content []struct {
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"result"`
+		Error *struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &rpcResp); err != nil {
+		t.Fatalf("decode rpc response: %v", err)
+	}
+	if rpcResp.Error != nil {
+		t.Fatalf("rpc error: %s", rpcResp.Error.Message)
+	}
+	if len(rpcResp.Result.Content) == 0 {
+		t.Fatalf("empty result content")
+	}
+	return rpcResp.Result.Content[0].Text
+}
+
+func TestMCPListFilesGlob(t *testing.T) {
+	root := t.TempDir()
+	os.MkdirAll(filepath.Join(root, "src"), 0o755)
+	os.WriteFile(filepath.Join(root, "main.go"), []byte("package main"), 0o644)
+	os.WriteFile(filepath.Join(root, "readme.md"), []byte("hi"), 0o644)
+	os.WriteFile(filepath.Join(root, "src", "app.go"), []byte("package src"), 0o644)
+
+	srv := newTestServerRoot(t, root)
+	text := callToolMCP(t, srv, "list_files", map[string]interface{}{
+		"glob": "**/*.go",
+	})
+
+	var entries []FileEntry
+	if err := json.Unmarshal([]byte(text), &entries); err != nil {
+		t.Fatalf("decode entries: %v", err)
+	}
+
+	paths := map[string]bool{}
+	for _, e := range entries {
+		paths[e.Path] = true
+	}
+
+	if !paths["main.go"] || !paths["src/app.go"] {
+		t.Errorf("expected glob to match .go files, got: %v", paths)
+	}
+	if paths["readme.md"] {
+		t.Errorf("expected glob to exclude readme.md")
+	}
+}
+
+func TestMCPReadFileWithOffsetAndLimit(t *testing.T) {
+	root := t.TempDir()
+	content := "line1\nline2\nline3\nline4\nline5\n"
+	os.WriteFile(filepath.Join(root, "lines.txt"), []byte(content), 0o644)
+
+	srv := newTestServerRoot(t, root)
+	text := callToolMCP(t, srv, "read_file", map[string]interface{}{
+		"path":   "lines.txt",
+		"offset": 2,
+		"limit":  2,
+	})
+
+	var payload struct {
+		Metadata struct {
+			TotalLines int  `json:"totalLines"`
+			StartLine  int  `json:"startLine"`
+			EndLine    int  `json:"endLine"`
+			Truncated  bool `json:"truncated"`
+		} `json:"metadata"`
+		Content string `json:"content"`
+	}
+	if err := json.Unmarshal([]byte(text), &payload); err != nil {
+		t.Fatalf("decode payload: %v", err)
+	}
+
+	if payload.Content != "line2\nline3" {
+		t.Errorf("expected lines 2-3, got %q", payload.Content)
+	}
+	if payload.Metadata.StartLine != 2 {
+		t.Errorf("expected startLine=2, got %d", payload.Metadata.StartLine)
+	}
+	if payload.Metadata.EndLine != 3 {
+		t.Errorf("expected endLine=3, got %d", payload.Metadata.EndLine)
+	}
+	if payload.Metadata.TotalLines != 5 {
+		t.Errorf("expected totalLines=5, got %d", payload.Metadata.TotalLines)
+	}
+	if !payload.Metadata.Truncated {
+		t.Errorf("expected truncated=true")
+	}
+}
+
+func TestMCPReadFileWithoutOffsetLimit(t *testing.T) {
+	root := t.TempDir()
+	os.WriteFile(filepath.Join(root, "small.txt"), []byte("hello"), 0o644)
+
+	srv := newTestServerRoot(t, root)
+	text := callToolMCP(t, srv, "read_file", map[string]interface{}{
+		"path": "small.txt",
+	})
+
+	var payload struct {
+		Metadata struct {
+			TotalLines int `json:"totalLines"`
+		} `json:"metadata"`
+		Content string `json:"content"`
+	}
+	if err := json.Unmarshal([]byte(text), &payload); err != nil {
+		t.Fatalf("decode payload: %v", err)
+	}
+
+	if payload.Content != "hello" {
+		t.Errorf("expected full content, got %q", payload.Content)
+	}
+	if payload.Metadata.TotalLines != 0 {
+		t.Errorf("expected no totalLines in byte mode, got %d", payload.Metadata.TotalLines)
+	}
+}
+
+func TestMCPListFilesGlobSchemaExposed(t *testing.T) {
+	srv, root := newTestServer(t)
+	defer os.RemoveAll(root)
+
+	body := `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`
+	resp := postMCP(t, srv, []byte(body))
+
+	var rpcResp struct {
+		Result struct {
+			Tools []struct {
+				Name        string                 `json:"name"`
+				InputSchema map[string]interface{} `json:"inputSchema"`
+			} `json:"tools"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &rpcResp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	for _, tool := range rpcResp.Result.Tools {
+		if tool.Name == "list_files" {
+			props, ok := tool.InputSchema["properties"].(map[string]interface{})
+			if !ok {
+				t.Fatalf("expected properties map")
+			}
+			if _, ok := props["glob"]; !ok {
+				t.Fatalf("expected glob property in list_files schema")
+			}
+			return
+		}
+	}
+	t.Fatalf("list_files tool not found")
+}
+
+func TestMCPReadFileOffsetLimitSchemaExposed(t *testing.T) {
+	srv, root := newTestServer(t)
+	defer os.RemoveAll(root)
+
+	body := `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`
+	resp := postMCP(t, srv, []byte(body))
+
+	var rpcResp struct {
+		Result struct {
+			Tools []struct {
+				Name        string                 `json:"name"`
+				InputSchema map[string]interface{} `json:"inputSchema"`
+			} `json:"tools"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &rpcResp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	for _, tool := range rpcResp.Result.Tools {
+		if tool.Name == "read_file" {
+			props, ok := tool.InputSchema["properties"].(map[string]interface{})
+			if !ok {
+				t.Fatalf("expected properties map")
+			}
+			if _, ok := props["offset"]; !ok {
+				t.Fatalf("expected offset property in read_file schema")
+			}
+			if _, ok := props["limit"]; !ok {
+				t.Fatalf("expected limit property in read_file schema")
+			}
+			return
+		}
+	}
+	t.Fatalf("read_file tool not found")
+}

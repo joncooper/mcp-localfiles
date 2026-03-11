@@ -33,8 +33,8 @@ func TestMCPDashboardEventCounters(t *testing.T) {
 	if d.reqCount != 3 {
 		t.Fatalf("expected 3 requests, got %d", d.reqCount)
 	}
-	if d.okCount != 2 {
-		t.Fatalf("expected 2 ok events (empty error means ok), got %d", d.okCount)
+	if d.okCount != 1 {
+		t.Fatalf("expected 1 ok event, got %d", d.okCount)
 	}
 	if d.errCount != 2 {
 		t.Fatalf("expected 2 error statuses, got %d", d.errCount)
@@ -229,5 +229,43 @@ func TestClampViewport(t *testing.T) {
 		if got != tc.want {
 			t.Fatalf("%s: expected %d, got %d", tc.name, tc.want, got)
 		}
+	}
+}
+
+func TestMCPDashboardEventRingBufferAllocations(t *testing.T) {
+	d := NewMCPDashboard(MCPDashboardConfig{
+		LocalURL:     "http://127.0.0.1:8080/mcp",
+		RemoteURL:    "https://host.ts.net/mcp",
+		RootDir:      ".",
+		ExposePath:   "/mcp",
+		ExposeActive: true,
+		AuthToken:    "token",
+	})
+
+	// Fill the buffer to capacity
+	for i := 0; i < tuiLogCapacity; i++ {
+		d.recordEvent(MCPEvent{Method: "tools/list", Status: 200, Tool: "tools/list"})
+	}
+
+	initialPtr := &d.events[0]
+	allocs := 0
+
+	// Add many more events to force capacity exhaustion if it's naive slice shifting
+	for i := 0; i < tuiLogCapacity*3; i++ {
+		d.recordEvent(MCPEvent{Method: "tools/list", Status: 200, Tool: "tools/list"})
+		currentPtr := &d.events[0]
+		if currentPtr != initialPtr {
+			allocs++
+			initialPtr = currentPtr
+		}
+	}
+
+	// With naive shifting (d.events[1:] + append), the pointer will change every time cap is reached.
+	// With a proper ring buffer or in-place copy, the backing array pointer for the slice 
+	// should not change repeatedly (or at all, if we just shift within the same slice).
+	// Wait, if it's in-place copy, d.events[0] stays the same pointer.
+	// If it's a ring buffer, d.events might not even be a slice, or we just overwrite.
+	if allocs > 0 {
+		t.Fatalf("expected 0 array reallocations when full, got %v", allocs)
 	}
 }

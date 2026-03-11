@@ -17,6 +17,26 @@ In `tui.go:582–590`, `errCount` increments when `evt.Status >= 400` and `okCou
 
 If `os.Open` or `d.Info()` fails due to permissions on a single file, the `filepath.WalkDir` callback returns the error, terminating the entire search or listing instead of skipping the unreadable file. This makes the tool brittle in directories with mixed permissions.
 
+## 14. High: `GET /mcp` is still rejected even though the transport requires it
+
+`server.go:160` rejects every non-`POST` request with `405 Method Not Allowed`. That leaves the MCP endpoint incompatible with clients that expect the Streamable HTTP transport's required `GET` support.
+
+## 15. Medium: Subsequent MCP requests do not validate `MCP-Protocol-Version`
+
+The server negotiates `initialize.protocolVersion`, but `server.go` still does not validate the `MCP-Protocol-Version` HTTP header on later requests or reject unsupported values with `400 Bad Request`. This leaves protocol mismatches undetected instead of failing fast.
+
+## 16. Medium: Case-insensitive literal search miscomputes offsets for non-ASCII text
+
+In `filemanager.go:444-478`, the case-insensitive literal path lowercases the entire line before searching, then reuses those byte offsets against the original UTF-8 string in `filemanager.go:509-522`. Unicode case folds can change byte width, so `column`, `match_text`, and `line_text` can be wrong or even invalid UTF-8.
+
+## 17. Medium: `search_files` fails on long single-line files that are still within the configured size limit
+
+`filemanager.go:500-531` uses `bufio.Scanner` with a hard 1 MiB token limit, while `SearchFiles` accepts larger `max_bytes_per_file` values and the server allows up to 10 MiB. A valid search over a file containing a single long line therefore fails the whole request with `bufio.Scanner: token too long`.
+
+## 18. Medium: Default Apple sandbox profile grants write access to the served root
+
+`main.go:541-546` adds `(allow file-write* (subpath <root>))` to the generated sandbox profile even though the server only exposes read-oriented operations. That weakens the sandbox's defense-in-depth value by allowing modification or deletion of files under the served tree if the process is compromised.
+
 ## 11. Low: Inefficient slice shifting in `MCPDashboard.recordEvent` causes frequent allocations
 
 `d.events = d.events[1:]` followed by `append` moves the slice window forward, forcing a reallocation every `tuiLogCapacity` events. A circular buffer or using `copy()` to shift elements in place would avoid these continuous allocations.
@@ -64,6 +84,4 @@ In `filemanager.go`, `limit := maxBytes` is clamped to `info.Size()`. For pseudo
 
 # New Observations
 
-- `POST /mcp` is implemented, but the MCP Streamable HTTP transport also requires the endpoint to support `GET`. The current server still returns `405 Method Not Allowed` for `GET /mcp`.
-- The server now negotiates `initialize.protocolVersion`, but it still does not validate the `MCP-Protocol-Version` HTTP header on subsequent requests or reject unsupported values with `400 Bad Request`.
 - In-root symlinks are now rejected consistently instead of being followed. That keeps confinement simple and predictable, but symlink-based aliases inside the served tree are no longer supported.

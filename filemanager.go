@@ -54,6 +54,9 @@ type ReadFileResult struct {
 	Content    string `json:"content"`
 	IsText     bool   `json:"isText"`
 	Truncated  bool   `json:"truncated"`
+	TotalLines int    `json:"totalLines,omitempty"`
+	StartLine  int    `json:"startLine,omitempty"`
+	EndLine    int    `json:"endLine,omitempty"`
 }
 
 type SearchMatch struct {
@@ -115,7 +118,16 @@ func NewFileManager(root string, excludeDot bool, excludeRegex string) (*FileMan
 	}, nil
 }
 
-func (m *FileManager) List(path string, recursive bool) ([]FileEntry, error) {
+func (m *FileManager) List(path string, recursive bool, glob string) ([]FileEntry, error) {
+	glob = strings.TrimSpace(glob)
+	if glob != "" {
+		if err := validateFileGlobPattern(glob); err != nil {
+			return nil, fmt.Errorf("invalid glob: %w", err)
+		}
+		// Glob patterns require a recursive walk to match paths at any depth.
+		recursive = true
+	}
+
 	baseAbs, relToRoot, err := m.resolveAndValidate(path)
 	if err != nil {
 		return nil, err
@@ -165,6 +177,16 @@ func (m *FileManager) List(path string, recursive bool) ([]FileEntry, error) {
 					return filepath.SkipDir
 				}
 				return nil
+			}
+
+			if glob != "" {
+				matched, matchErr := doublestar.Match(filepath.ToSlash(glob), rel)
+				if matchErr != nil {
+					return matchErr
+				}
+				if !matched {
+					return nil
+				}
 			}
 
 			info, err := d.Info()
@@ -228,7 +250,7 @@ func (m *FileManager) List(path string, recursive bool) ([]FileEntry, error) {
 	return entries, nil
 }
 
-func (m *FileManager) ReadFile(path string, maxBytes int64) (*ReadFileResult, error) {
+func (m *FileManager) ReadFile(path string, maxBytes int64, offset int, limit int) (*ReadFileResult, error) {
 	if maxBytes <= 0 {
 		return nil, errors.New("maxBytes must be > 0")
 	}
@@ -252,18 +274,23 @@ func (m *FileManager) ReadFile(path string, maxBytes int64) (*ReadFileResult, er
 	}
 	defer f.Close()
 
-	limit := maxBytes
-	
-	// Read up to limit + 1 to determine if the file was truncated
-	raw, err := io.ReadAll(io.LimitReader(f, limit+1))
+	useLineMode := offset > 0 || limit > 0
+	if useLineMode {
+		return m.readFileLines(f, rel, info, offset, limit)
+	}
+
+	byteLimit := maxBytes
+
+	// Read up to byteLimit + 1 to determine if the file was truncated
+	raw, err := io.ReadAll(io.LimitReader(f, byteLimit+1))
 	if err != nil {
 		return nil, err
 	}
-	
+
 	truncated := false
-	if int64(len(raw)) > limit {
+	if int64(len(raw)) > byteLimit {
 		truncated = true
-		raw = raw[:limit]
+		raw = raw[:byteLimit]
 	}
 
 	return &ReadFileResult{
@@ -273,6 +300,55 @@ func (m *FileManager) ReadFile(path string, maxBytes int64) (*ReadFileResult, er
 		Content:    string(raw),
 		IsText:     utf8.Valid(raw),
 		Truncated:  truncated,
+	}, nil
+}
+
+// readFileLines reads a specific line range from the file. offset is 1-based
+// (line 1 is the first line). limit is the maximum number of lines to return.
+// If offset is 0 or negative it defaults to 1. If limit is 0 or negative the
+// remainder of the file is returned.
+func (m *FileManager) readFileLines(f *os.File, rel string, info os.FileInfo, offset int, limit int) (*ReadFileResult, error) {
+	if offset <= 0 {
+		offset = 1
+	}
+
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+
+	var selected []string
+	totalLines := 0
+	for scanner.Scan() {
+		totalLines++
+		if totalLines < offset {
+			continue
+		}
+		if limit > 0 && len(selected) >= limit {
+			continue
+		}
+		selected = append(selected, scanner.Text())
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+
+	endLine := offset + len(selected) - 1
+	if len(selected) == 0 {
+		endLine = 0
+	}
+
+	content := strings.Join(selected, "\n")
+	truncated := limit > 0 && endLine < totalLines
+
+	return &ReadFileResult{
+		Path:       rel,
+		Size:       info.Size(),
+		ModTimeUTC: info.ModTime().UTC().Format(time.RFC3339),
+		Content:    content,
+		IsText:     utf8.Valid([]byte(content)),
+		Truncated:  truncated,
+		TotalLines: totalLines,
+		StartLine:  offset,
+		EndLine:    endLine,
 	}, nil
 }
 

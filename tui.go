@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"log"
 	"strings"
 	"sync"
 	"time"
@@ -118,7 +119,9 @@ func (d *MCPDashboard) Start(ctx context.Context, eventCh <-chan MCPEvent) {
 	d.mu.Unlock()
 
 	go func() {
-		_, _ = p.Run()
+		if _, err := p.Run(); err != nil {
+			log.Printf("dashboard: bubbletea exited with error: %v", err)
+		}
 	}()
 
 	go func() {
@@ -210,7 +213,9 @@ func (m mcpDashboardModel) View() tea.View {
 	if state.ReqCount == 0 {
 		sections = append(sections, renderSetupPanel(width, state, endpoint))
 		sections = append(sections, renderFooterPanel(width, false))
-		return tea.NewView(strings.Join(sections, "\n\n"))
+		v := tea.NewView(strings.Join(sections, "\n\n"))
+		v.AltScreen = true
+		return v
 	}
 
 	listPanel := renderEventListPanel(calcListWidth(width), height, state)
@@ -222,7 +227,9 @@ func (m mcpDashboardModel) View() tea.View {
 	}
 	sections = append(sections, renderFooterPanel(width, true))
 
-	return tea.NewView(strings.Join(sections, "\n\n"))
+	v := tea.NewView(strings.Join(sections, "\n\n"))
+	v.AltScreen = true
+	return v
 }
 
 func renderHeroPanel(width int, state dashboardSnapshot, endpoint string, uptime time.Duration) string {
