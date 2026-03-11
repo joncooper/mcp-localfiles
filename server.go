@@ -213,6 +213,24 @@ func (s *MCPServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if method != "initialize" {
+		protocolVersion := r.Header.Get("MCP-Protocol-Version")
+		if protocolVersion == "" {
+			rw.WriteHeader(http.StatusBadRequest)
+			_, _ = rw.Write([]byte("missing MCP-Protocol-Version header"))
+			details = "missing protocol version header"
+			errMsg = "bad request"
+			return
+		}
+		if _, ok := supportedMCPProtocolVersions[protocolVersion]; !ok {
+			rw.WriteHeader(http.StatusBadRequest)
+			_, _ = rw.Write([]byte("unsupported MCP-Protocol-Version header"))
+			details = "unsupported protocol version"
+			errMsg = "bad request"
+			return
+		}
+	}
+
 	switch method {
 	case "initialize":
 		protocolVersion, err := negotiateProtocolVersion(req.Params)
