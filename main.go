@@ -199,7 +199,7 @@ func run() error {
 			TailscaleHost:      discoveredHostname,
 			TailscalePort:      cfg.TailscalePort,
 		})
-		dashboard.Start(ctx, eventCh)
+		dashboard.Start(ctx, eventCh, stop)
 	}
 
 	if cfg.NoTui {

@@ -174,7 +174,7 @@ func NewMCPDashboard(cfg MCPDashboardConfig) *MCPDashboard {
 	}
 }
 
-func (d *MCPDashboard) Start(ctx context.Context, eventCh <-chan MCPEvent) {
+func (d *MCPDashboard) Start(ctx context.Context, eventCh <-chan MCPEvent, onQuit func()) {
 	d.mu.Lock()
 	if d.program != nil {
 		d.mu.Unlock()
@@ -197,6 +197,9 @@ func (d *MCPDashboard) Start(ctx context.Context, eventCh <-chan MCPEvent) {
 	go func() {
 		if _, err := p.Run(); err != nil {
 			log.Printf("dashboard: bubbletea exited with error: %v", err)
+		}
+		if onQuit != nil {
+			onQuit()
 		}
 	}()
 
