@@ -387,8 +387,8 @@ func (s *MCPServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		writeRPCResult(rw, req.ID, map[string]interface{}{"tools": tools})
 	case "tools/call":
-		result, tool, toolDetails, err := s.callTool(req.Params)
-		tool = "tools.call:" + tool
+		result, toolName, toolDetails, err := s.callTool(req.Params)
+		tool = "tools.call:" + toolName
 		details = toolDetails
 		if err != nil {
 			writeRPCError(rw, req.ID, -32602, err.Error())
