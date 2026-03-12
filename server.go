@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
@@ -51,7 +50,6 @@ type MCPEvent struct {
 	Authorized    bool
 	RequestID     string
 	RequestParams string
-	ResponseBody  string
 	RequestSize   int
 	ResponseSize  int
 }
@@ -137,7 +135,7 @@ func NewMCPServer(cfg MCPConfig) (*MCPServer, error) {
 func (s *MCPServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	client := extractClientAddr(r.RemoteAddr)
-	rw := &mcpResponseWriter{ResponseWriter: w}
+	rw := &mcpResponseWriter{ResponseWriter: w, status: http.StatusOK}
 
 	method := "unknown"
 	tool := "-"
@@ -211,7 +209,7 @@ func (s *MCPServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	requestSize = len(bodyBytes)
 
 	var req JSONRPCRequest
-	if err := json.NewDecoder(bytes.NewReader(bodyBytes)).Decode(&req); err != nil {
+	if err := json.Unmarshal(bodyBytes, &req); err != nil {
 		method = "parse"
 		details = "invalid JSON payload"
 		errMsg = "parse error: invalid JSON"
@@ -535,45 +533,28 @@ func (s *MCPServer) callTool(rawParams json.RawMessage) (ToolResult, string, str
 				return ToolResult{}, params.Name, "invalid args for search_files", errors.New("invalid args for search_files")
 			}
 		}
-		path := "."
-		if rawPath, ok := args["path"]; ok {
-			pathValue, ok := rawPath.(string)
-			if !ok {
-				return ToolResult{}, params.Name, "invalid path argument", errors.New("invalid path argument")
-			}
-			path = pathValue
+		path, err := getOptionalStringArg(args, "path", ".")
+		if err != nil {
+			return ToolResult{}, params.Name, "invalid path argument", errors.New("invalid path argument")
 		}
-		rawQuery, ok := args["query"]
-		if !ok {
-			return ToolResult{}, params.Name, "missing required argument: query", errors.New("missing required argument: query")
-		}
-		query, ok := rawQuery.(string)
-		if !ok {
+		query, err := getOptionalStringArg(args, "query", "")
+		if err != nil {
 			return ToolResult{}, params.Name, "invalid query argument", errors.New("invalid query argument")
 		}
-		caseSensitive := false
-		if rawCase, ok := args["case_sensitive"]; ok {
-			caseValue, ok := rawCase.(bool)
-			if !ok {
-				return ToolResult{}, params.Name, "invalid case_sensitive argument", errors.New("invalid case_sensitive argument")
-			}
-			caseSensitive = caseValue
+		if strings.TrimSpace(query) == "" {
+			return ToolResult{}, params.Name, "missing required argument: query", errors.New("missing required argument: query")
 		}
-		useRegex := false
-		if rawRegex, ok := args["regex"]; ok {
-			regexValue, ok := rawRegex.(bool)
-			if !ok {
-				return ToolResult{}, params.Name, "invalid regex argument", errors.New("invalid regex argument")
-			}
-			useRegex = regexValue
+		caseSensitive, err := getOptionalBoolArg(args, "case_sensitive", false)
+		if err != nil {
+			return ToolResult{}, params.Name, "invalid case_sensitive argument", errors.New("invalid case_sensitive argument")
 		}
-		fileGlob := ""
-		if rawFileGlob, ok := args["file_glob"]; ok {
-			fileGlobValue, ok := rawFileGlob.(string)
-			if !ok {
-				return ToolResult{}, params.Name, "invalid file_glob argument", errors.New("invalid file_glob argument")
-			}
-			fileGlob = fileGlobValue
+		useRegex, err := getOptionalBoolArg(args, "regex", false)
+		if err != nil {
+			return ToolResult{}, params.Name, "invalid regex argument", errors.New("invalid regex argument")
+		}
+		fileGlob, err := getOptionalStringArg(args, "file_glob", "")
+		if err != nil {
+			return ToolResult{}, params.Name, "invalid file_glob argument", errors.New("invalid file_glob argument")
 		}
 		maxMatches, err := getIntArg(args, "max_matches", 100, 1, 1000)
 		if err != nil {
@@ -582,9 +563,6 @@ func (s *MCPServer) callTool(rawParams json.RawMessage) (ToolResult, string, str
 		maxBytesPerFile, err := getIntArg(args, "max_bytes_per_file", defaultSearchMaxBytesPerFile, 1024, 10*1024*1024)
 		if err != nil {
 			return ToolResult{}, params.Name, "invalid max_bytes_per_file argument", err
-		}
-		if strings.TrimSpace(query) == "" {
-			return ToolResult{}, params.Name, "missing required argument: query", errors.New("missing required argument: query")
 		}
 
 		matches, truncated, err := s.fileManager.SearchFiles(path, SearchOptions{

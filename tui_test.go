@@ -272,10 +272,10 @@ func TestFilterEventsFieldMatch(t *testing.T) {
 		t.Fatalf("expected 2 matches for -status:401, got %v", got)
 	}
 
-	// Empty filter returns all
+	// Empty filter returns nil (meaning "all events")
 	got = filterEvents(events, "")
-	if len(got) != 3 {
-		t.Fatalf("expected all events for empty filter, got %v", got)
+	if got != nil {
+		t.Fatalf("expected nil for empty filter, got %v", got)
 	}
 }
 
@@ -339,10 +339,10 @@ func TestWrapText(t *testing.T) {
 }
 
 func TestPadLine(t *testing.T) {
-	if got := padLine("abc", 5); got != "abc  " {
+	if got := fitToWidth("abc", 5); got != "abc  " {
 		t.Fatalf("unexpected pad: %q", got)
 	}
-	if got := padLine("abcdef", 4); got != "abc…" {
+	if got := fitToWidth("abcdef", 4); got != "abc…" {
 		t.Fatalf("unexpected truncate: %q", got)
 	}
 }
