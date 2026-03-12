@@ -122,7 +122,7 @@ Supported methods:
   - Tool `search_files`:
     - `path` (string, default `.`) — directory to search within
     - `query` (string, required) — text to search for
-    - `case_sensitive` (bool, default `true`)
+    - `case_sensitive` (bool, default `false`)
     - `max_matches` (int, default `100`)
     - `max_bytes_per_file` (int, optional) — skip files larger than this
 
@@ -149,14 +149,24 @@ Current command pattern:
 
 ## Interactive mode
 
-By default, the binary runs a terminal dashboard that shows:
+By default, the binary runs a Wireshark-inspired terminal dashboard with:
 
-- startup status and setup instructions (shown until the first request)
-- local and remote endpoint information
-- request throughput and error counters
-- per-request stream view (method, tool, client, status, latency, details)
-- unauthorized and parse/method errors with inline context
-- arrow-key friendly, row-based request log with expandable detail rows
+- pinned top bar: endpoint, uptime, live/paused status, request counters
+- pinned bottom bar: keybinding hints or filter input
+- color-coded scrollable request table (green 2xx, red errors, yellow 401)
+- detail inspector pane with expandable request params and metadata
+- setup instructions shown until the first request arrives
+
+Keyboard shortcuts:
+
+- `j`/`k` or arrows: move selection
+- `g`/`G`: jump to top/bottom
+- `ctrl-d`/`ctrl-u`: half-page scroll
+- `enter`: expand/collapse inspector details
+- `space`: pause/resume live stream
+- `/`: filter (`tool:read_file`, `status:200`, `-status:401`, free text)
+- `c`: clear event log
+- `q`: quit
 
 Disable the dashboard with `--no-tui` if you need plain logs.
 
