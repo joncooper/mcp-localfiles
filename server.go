@@ -1,17 +1,21 @@
 package main
 
 import (
+	"bytes"
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
 )
+
+const maxEventBodyCapture = 4096
 
 const (
 	rpcVersion               = "2.0"
@@ -36,15 +40,20 @@ type MCPConfig struct {
 }
 
 type MCPEvent struct {
-	Timestamp  time.Time
-	Client     string
-	Method     string
-	Tool       string
-	Details    string
-	Status     int
-	Error      string
-	Latency    time.Duration
-	Authorized bool
+	Timestamp     time.Time
+	Client        string
+	Method        string
+	Tool          string
+	Details       string
+	Status        int
+	Error         string
+	Latency       time.Duration
+	Authorized    bool
+	RequestID     string
+	RequestParams string
+	ResponseBody  string
+	RequestSize   int
+	ResponseSize  int
 }
 
 type JSONRPCRequest struct {
@@ -135,21 +144,28 @@ func (s *MCPServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	details := "incoming request"
 	errMsg := ""
 	authorized := false
+	requestID := ""
+	requestParams := ""
+	requestSize := 0
 
 	defer func() {
 		if s.onEvent == nil {
 			return
 		}
 		s.onEvent(MCPEvent{
-			Timestamp:  time.Now(),
-			Client:     client,
-			Method:     method,
-			Tool:       tool,
-			Details:    details,
-			Status:     rw.status,
-			Error:      errMsg,
-			Latency:    time.Since(start),
-			Authorized: authorized,
+			Timestamp:     time.Now(),
+			Client:        client,
+			Method:        method,
+			Tool:          tool,
+			Details:       details,
+			Status:        rw.status,
+			Error:         errMsg,
+			Latency:       time.Since(start),
+			Authorized:    authorized,
+			RequestID:     requestID,
+			RequestParams: requestParams,
+			RequestSize:   requestSize,
+			ResponseSize:  rw.size,
 		})
 	}()
 
@@ -184,14 +200,34 @@ func (s *MCPServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	reqBody := http.MaxBytesReader(rw, r.Body, maxBodyBytes)
 	defer reqBody.Close()
+	bodyBytes, readErr := io.ReadAll(reqBody)
+	if readErr != nil {
+		method = "parse"
+		details = "request body read error"
+		errMsg = "parse error: " + readErr.Error()
+		writeRPCError(rw, nil, -32700, errMsg)
+		return
+	}
+	requestSize = len(bodyBytes)
 
 	var req JSONRPCRequest
-	if err := json.NewDecoder(reqBody).Decode(&req); err != nil {
+	if err := json.NewDecoder(bytes.NewReader(bodyBytes)).Decode(&req); err != nil {
 		method = "parse"
 		details = "invalid JSON payload"
 		errMsg = "parse error: invalid JSON"
 		writeRPCError(rw, req.ID, -32700, errMsg)
 		return
+	}
+
+	if len(req.ID) > 0 {
+		requestID = string(req.ID)
+	}
+	if len(req.Params) > 0 {
+		p := string(req.Params)
+		if len(p) > maxEventBodyCapture {
+			p = p[:maxEventBodyCapture] + "..."
+		}
+		requestParams = p
 	}
 
 	method = strings.TrimSpace(req.Method)
@@ -763,9 +799,16 @@ func extractClientAddr(raw string) string {
 type mcpResponseWriter struct {
 	http.ResponseWriter
 	status int
+	size   int
 }
 
 func (w *mcpResponseWriter) WriteHeader(code int) {
 	w.status = code
 	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w *mcpResponseWriter) Write(b []byte) (int, error) {
+	n, err := w.ResponseWriter.Write(b)
+	w.size += n
+	return n, err
 }

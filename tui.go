@@ -10,16 +10,108 @@ import (
 	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/lipgloss"
 )
 
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
 const (
-	tuiRefreshMs      = 200 * time.Millisecond
-	tuiLogCapacity    = 30
-	detailLinesLimit  = 3
-	logRows           = 8
-	minDashboardWidth = 72
-	maxDashboardWidth = 140
+	tuiRefreshMs   = 200 * time.Millisecond
+	tuiLogCapacity = 200
+	inspectorRows  = 12
 )
+
+// ---------------------------------------------------------------------------
+// Styles
+// ---------------------------------------------------------------------------
+
+var (
+	// Top and bottom bars
+	barStyle = lipgloss.NewStyle().
+			Background(lipgloss.Color("236")).
+			Foreground(lipgloss.Color("252")).
+			Padding(0, 1)
+	barAccent = lipgloss.NewStyle().
+			Background(lipgloss.Color("236")).
+			Foreground(lipgloss.Color("117")).
+			Bold(true).
+			Padding(0, 1)
+	barDim = lipgloss.NewStyle().
+		Background(lipgloss.Color("236")).
+		Foreground(lipgloss.Color("243")).
+		Padding(0, 0)
+	liveIndicator = lipgloss.NewStyle().
+			Background(lipgloss.Color("236")).
+			Foreground(lipgloss.Color("114")).
+			Bold(true)
+	pausedIndicator = lipgloss.NewStyle().
+			Background(lipgloss.Color("236")).
+			Foreground(lipgloss.Color("220")).
+			Bold(true)
+
+	// Table header
+	tableHeaderStyle = lipgloss.NewStyle().
+				Bold(true).
+				Foreground(lipgloss.Color("252")).
+				Background(lipgloss.Color("238"))
+
+	// Table rows
+	rowNormal   = lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
+	rowSelected = lipgloss.NewStyle().Background(lipgloss.Color("24")).Foreground(lipgloss.Color("255"))
+	rowOk       = lipgloss.NewStyle().Foreground(lipgloss.Color("114"))
+	rowError    = lipgloss.NewStyle().Foreground(lipgloss.Color("203"))
+	rowUnauth   = lipgloss.NewStyle().Foreground(lipgloss.Color("220"))
+	rowDim      = lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
+
+	// Inspector
+	inspectorBorder = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("240")).
+			Padding(0, 1)
+	inspectorLabel = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("243")).
+			Width(12)
+	inspectorValue = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("252"))
+	inspectorSection = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("117")).
+				Bold(true)
+
+	// Filter
+	filterPrompt = lipgloss.NewStyle().
+			Background(lipgloss.Color("236")).
+			Foreground(lipgloss.Color("220")).
+			Bold(true)
+	filterInput = lipgloss.NewStyle().
+			Background(lipgloss.Color("236")).
+			Foreground(lipgloss.Color("255"))
+
+	// Setup screen
+	setupHeader = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("117")).
+			Bold(true)
+	setupDim = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("243"))
+	setupValue = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("255"))
+)
+
+// ---------------------------------------------------------------------------
+// TUI mode
+// ---------------------------------------------------------------------------
+
+type tuiMode int
+
+const (
+	modeNormal tuiMode = iota
+	modeFilter
+)
+
+// ---------------------------------------------------------------------------
+// Config & Dashboard
+// ---------------------------------------------------------------------------
 
 type MCPDashboardConfig struct {
 	LocalURL           string
@@ -48,10 +140,7 @@ type MCPDashboard struct {
 
 	mu sync.Mutex
 
-	events []MCPEvent
-	// reqCount is the total count. reqCount == len(events) because we only
-	// track successful event captures from the server path. It is kept for O(1)
-	// rendering and to avoid recomputing under lock.
+	events   []MCPEvent
 	reqCount int
 	okCount  int
 	errCount int
@@ -60,6 +149,9 @@ type MCPDashboard struct {
 	selected int
 	expanded bool
 	viewport int
+	paused   bool
+	mode     tuiMode
+	filter   string
 	program  *tea.Program
 	stopOnce sync.Once
 }
@@ -109,8 +201,8 @@ func (d *MCPDashboard) Start(ctx context.Context, eventCh <-chan MCPEvent) {
 
 	model := &mcpDashboardModel{
 		dashboard: d,
-		width:     108,
-		height:    30,
+		width:     120,
+		height:    40,
 	}
 
 	p := tea.NewProgram(model)
@@ -140,6 +232,21 @@ func (d *MCPDashboard) Start(ctx context.Context, eventCh <-chan MCPEvent) {
 	}()
 }
 
+func (d *MCPDashboard) Stop() {
+	d.stopOnce.Do(func() {
+		d.mu.Lock()
+		p := d.program
+		d.mu.Unlock()
+		if p != nil {
+			p.Quit()
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
+// Bubbletea lifecycle
+// ---------------------------------------------------------------------------
+
 func (m mcpDashboardModel) Init() tea.Cmd {
 	return tea.Tick(tuiRefreshMs, func(t time.Time) tea.Msg {
 		return tickMsg(t)
@@ -154,18 +261,7 @@ func (m mcpDashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 	case tea.KeyMsg:
-		switch msg.String() {
-		case "q", "ctrl+c", "Q", "ctrl+C", "x", "X":
-			return m, tea.Quit
-		case "up", "k", "K":
-			d.handleInput("up")
-		case "down", "j", "J":
-			d.handleInput("down")
-		case "enter", " ":
-			d.handleInput("toggle")
-		case "c", "C":
-			d.handleInput("clear")
-		}
+		return m.handleKey(msg)
 	case mcpDashboardMsg:
 		if msg.typ == "event" {
 			d.recordEvent(msg.evt)
@@ -175,7 +271,79 @@ func (m mcpDashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return tickMsg(t)
 		})
 	}
+	return m, nil
+}
 
+func (m mcpDashboardModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	d := m.dashboard
+	d.mu.Lock()
+	mode := d.mode
+	d.mu.Unlock()
+
+	if mode == modeFilter {
+		return m.handleFilterKey(msg)
+	}
+
+	switch msg.String() {
+	case "q", "ctrl+c":
+		return m, tea.Quit
+	case "up", "k":
+		d.handleInput("up")
+	case "down", "j":
+		d.handleInput("down")
+	case "G":
+		d.handleInput("end")
+	case "g":
+		d.handleInput("home")
+	case "ctrl+d":
+		d.handleInput("pagedown")
+	case "ctrl+u":
+		d.handleInput("pageup")
+	case "enter":
+		d.handleInput("toggle")
+	case " ":
+		d.handleInput("pause")
+	case "c":
+		d.handleInput("clear")
+	case "/":
+		d.handleInput("filter")
+	case "escape":
+		d.handleInput("escape")
+	}
+	return m, nil
+}
+
+func (m mcpDashboardModel) handleFilterKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	d := m.dashboard
+	key := msg.String()
+
+	switch key {
+	case "escape":
+		d.mu.Lock()
+		d.mode = modeNormal
+		d.filter = ""
+		d.mu.Unlock()
+	case "enter":
+		d.mu.Lock()
+		d.mode = modeNormal
+		d.mu.Unlock()
+	case "backspace":
+		d.mu.Lock()
+		if len(d.filter) > 0 {
+			d.filter = d.filter[:len(d.filter)-1]
+		}
+		d.mu.Unlock()
+	case "ctrl+u":
+		d.mu.Lock()
+		d.filter = ""
+		d.mu.Unlock()
+	default:
+		if len(key) == 1 && key[0] >= 32 && key[0] < 127 {
+			d.mu.Lock()
+			d.filter += key
+			d.mu.Unlock()
+		}
+	}
 	return m, nil
 }
 
@@ -185,18 +353,11 @@ func (m mcpDashboardModel) View() tea.View {
 
 	width := m.width
 	if width <= 0 {
-		width = 108
+		width = 120
 	}
-	if width > maxDashboardWidth {
-		width = maxDashboardWidth
-	}
-	if width < minDashboardWidth {
-		width = minDashboardWidth
-	}
-
 	height := m.height
 	if height <= 0 {
-		height = 30
+		height = 40
 	}
 
 	endpoint := state.RemoteURL
@@ -204,273 +365,608 @@ func (m mcpDashboardModel) View() tea.View {
 		endpoint = state.LocalURL
 	}
 
-	uptime := time.Since(state.StartedAt).Round(time.Second)
-	sections := []string{
-		renderHeroPanel(width, state, endpoint, uptime),
-		renderMetricsPanel(width, state),
-	}
-
-	if state.ReqCount == 0 {
-		sections = append(sections, renderSetupPanel(width, state, endpoint))
-		sections = append(sections, renderFooterPanel(width, false))
-		v := tea.NewView(strings.Join(sections, "\n\n"))
-		v.AltScreen = true
-		return v
-	}
-
-	listPanel := renderEventListPanel(calcListWidth(width), height, state)
-	detailPanel := renderDetailsPanel(calcDetailWidth(width), state)
-	if width >= 112 {
-		sections = append(sections, joinColumns(2, listPanel, detailPanel))
+	var content string
+	if state.ReqCount == 0 && state.Filter == "" {
+		content = renderSetupScreen(width, height, state, endpoint)
 	} else {
-		sections = append(sections, listPanel, detailPanel)
+		content = renderLiveScreen(width, height, state, endpoint)
 	}
-	sections = append(sections, renderFooterPanel(width, true))
 
-	v := tea.NewView(strings.Join(sections, "\n\n"))
+	v := tea.NewView(content)
 	v.AltScreen = true
 	return v
 }
 
-func renderHeroPanel(width int, state dashboardSnapshot, endpoint string, uptime time.Duration) string {
-	status := "Ready for first request"
-	if state.ReqCount > 0 {
-		status = "Live request stream"
-	}
-	lines := []string{
-		"Local Files MCP",
-		status,
-		fmt.Sprintf("Endpoint  %s", endpoint),
-		fmt.Sprintf("Root      %s", state.RootDir),
-		fmt.Sprintf("Uptime    %s", uptime.String()),
-		fmt.Sprintf("Exposure  %s via %s", boolToWord(state.Exposed), state.ExposePath),
-	}
-	if state.Exposed {
-		lines = append(lines, fmt.Sprintf("Tailnet   %s:%d", state.TailscaleHost, state.TailscalePort))
-	} else {
-		lines = append(lines, fmt.Sprintf("Local     %s", state.LocalURL))
-	}
-	return renderPanel(width, "Overview", lines)
-}
+// ---------------------------------------------------------------------------
+// Setup screen (before first request)
+// ---------------------------------------------------------------------------
 
-func renderMetricsPanel(width int, state dashboardSnapshot) string {
-	cardWidth := metricWidth(width, 4)
-	cards := []string{
-		renderMetricCard(cardWidth, "Requests", fmt.Sprintf("%d", state.ReqCount), "captured"),
-		renderMetricCard(cardWidth, "OK", fmt.Sprintf("%d", state.OkCount), "successful"),
-		renderMetricCard(cardWidth, "Errors", fmt.Sprintf("%d", state.ErrCount), "bad status"),
-		renderMetricCard(cardWidth, "Unauthorized", fmt.Sprintf("%d", state.Unauth), "401s"),
-	}
-	if width >= 120 {
-		return joinColumns(2, cards...)
-	}
-	if width >= 88 {
-		return joinColumns(2, cards[0], cards[1]) + "\n" + joinColumns(2, cards[2], cards[3])
-	}
-	return strings.Join(cards, "\n")
-}
+func renderSetupScreen(width, height int, state dashboardSnapshot, endpoint string) string {
+	top := renderTopBar(width, state, endpoint)
+	bot := renderBottomBar(width, state)
 
-func renderMetricCard(width int, label, value, caption string) string {
-	return renderPanel(width, label, []string{value, caption})
-}
+	var b strings.Builder
+	b.WriteString("\n")
+	b.WriteString(setupHeader.Render("  localfiles-mcp"))
+	b.WriteString("\n\n")
+	b.WriteString(setupDim.Render("  Waiting for the first MCP request..."))
+	b.WriteString("\n\n")
 
-func metricWidth(totalWidth int, columns int) int {
-	gaps := (columns - 1) * 2
-	width := (totalWidth - gaps) / columns
-	if width < 16 {
-		width = 16
-	}
-	return width
-}
-
-func calcListWidth(totalWidth int) int {
-	if totalWidth < 112 {
-		return totalWidth
-	}
-	return (totalWidth - 2) * 3 / 5
-}
-
-func calcDetailWidth(totalWidth int) int {
-	if totalWidth < 112 {
-		return totalWidth
-	}
-	return totalWidth - calcListWidth(totalWidth) - 2
-}
-
-func renderSetupPanel(width int, state dashboardSnapshot, endpoint string) string {
-	lines := []string{
-		"Connect ChatGPT",
-		"1. Open ChatGPT > Settings > Advanced > Model Context Protocol",
-		fmt.Sprintf("2. Add server URL: %s", endpoint),
-		fmt.Sprintf("3. Add header: Authorization: Bearer %s", state.Token),
-		"4. Start with list_files or read_file",
-		"",
-		"Waiting for the first request. The dashboard stays open so you can verify the connection path before using it.",
-	}
+	b.WriteString(setupHeader.Render("  Connect"))
+	b.WriteString("\n")
+	b.WriteString(fmt.Sprintf("  1. Add server URL:  %s\n", setupValue.Render(endpoint)))
+	b.WriteString(fmt.Sprintf("  2. Add header:      %s\n", setupValue.Render("Authorization: Bearer "+state.Token)))
+	b.WriteString(fmt.Sprintf("  3. Tools:           %s\n", setupValue.Render("list_files, read_file, search_files")))
 	if state.TokenAutoGenerated {
-		lines = append(lines, "Token was generated for this session.")
+		b.WriteString(setupDim.Render("     Token was auto-generated for this session."))
+		b.WriteString("\n")
 	}
+	b.WriteString("\n")
+
+	b.WriteString(setupHeader.Render("  Server"))
+	b.WriteString("\n")
+	b.WriteString(fmt.Sprintf("  Root:      %s\n", setupValue.Render(state.RootDir)))
+	b.WriteString(fmt.Sprintf("  Local:     %s\n", setupValue.Render(state.LocalURL)))
 	if state.Exposed {
-		lines = append(lines, fmt.Sprintf("Tailscale route: %s:%d%s", state.TailscaleHost, state.TailscalePort, state.ExposePath))
+		b.WriteString(fmt.Sprintf("  Tailscale: %s\n", setupValue.Render(fmt.Sprintf("%s:%d%s", state.TailscaleHost, state.TailscalePort, state.ExposePath))))
 	}
-	return renderPanel(width, "Connect", lines)
+
+	body := b.String()
+	bodyLines := strings.Count(body, "\n")
+	topLines := 1
+	botLines := 1
+	padLines := height - topLines - botLines - bodyLines
+	if padLines < 0 {
+		padLines = 0
+	}
+
+	return top + "\n" + body + strings.Repeat("\n", padLines) + bot
 }
 
-func renderEventListPanel(width int, height int, state dashboardSnapshot) string {
-	lines := []string{"Recent requests"}
-	if len(state.Events) == 0 {
-		lines = append(lines, "No activity yet.")
-		return renderPanel(width, "Activity", lines)
-	}
+// ---------------------------------------------------------------------------
+// Live screen (table + inspector)
+// ---------------------------------------------------------------------------
 
-	visible := clamp((height-20)/2, 4, logRows)
-	start := clampViewport(state.Selected, state.Viewport, visible, len(state.Events))
-	end := start + visible
-	if end > len(state.Events) {
-		end = len(state.Events)
-	}
+func renderLiveScreen(width, height int, state dashboardSnapshot, endpoint string) string {
+	top := renderTopBar(width, state, endpoint)
+	bot := renderBottomBar(width, state)
 
-	for i := start; i < end; i++ {
-		event := state.Events[i]
-		marker := " "
-		if i == state.Selected {
-			marker = "›"
-		}
-		head := fmt.Sprintf("%s %s  %s", marker, eventTime(event), summarizeEvent(event))
-		tail := fmt.Sprintf("  %s  %s  #%02d", strings.ToUpper(event.Method), fallback(event.Client, "unknown"), i+1)
-		lines = append(lines, head, tail)
-		if i == state.Selected && state.Expanded {
-			lines = append(lines, "  Expanded details are open in the inspector panel.")
+	// Budget: top(1) + tableHeader(1) + separator(1) + inspector(inspH) + bot(1) = 4 + inspH
+	filtered := filterEvents(state.Events, state.Filter)
+	inspH := inspectorRows
+	tableH := height - 4 - inspH
+	if tableH < 3 {
+		tableH = 3
+		inspH = height - 4 - tableH
+		if inspH < 3 {
+			inspH = 3
 		}
 	}
-	return renderPanel(width, "Activity", lines)
+
+	tableHeader := renderTableHeader(width)
+	tableBody := renderTableBody(width, tableH, state, filtered)
+	separator := lipgloss.NewStyle().Foreground(lipgloss.Color("238")).Render(strings.Repeat("─", width))
+	inspector := renderInspector(width, inspH, state)
+
+	return top + "\n" + tableHeader + "\n" + tableBody + "\n" + separator + "\n" + inspector + "\n" + bot
 }
 
-func renderDetailsPanel(width int, state dashboardSnapshot) string {
+// ---------------------------------------------------------------------------
+// Top bar
+// ---------------------------------------------------------------------------
+
+func renderTopBar(width int, state dashboardSnapshot, endpoint string) string {
+	uptime := time.Since(state.StartedAt).Round(time.Second)
+
+	title := barAccent.Render("localfiles-mcp")
+	ep := barDim.Render(endpoint)
+	up := barDim.Render(fmt.Sprintf("up %s", uptime))
+
+	var statusBadge string
+	if state.Paused {
+		statusBadge = pausedIndicator.Render(" PAUSED ")
+	} else {
+		statusBadge = liveIndicator.Render(" LIVE ")
+	}
+
+	counters := barStyle.Render(fmt.Sprintf("%d req  %d ok  %d err  %d unauth",
+		state.ReqCount, state.OkCount, state.ErrCount, state.Unauth))
+
+	left := title + " " + ep + " " + up + " " + statusBadge
+	right := counters
+
+	leftW := lipgloss.Width(left)
+	rightW := lipgloss.Width(right)
+	gap := width - leftW - rightW
+	if gap < 1 {
+		gap = 1
+	}
+
+	line := left + strings.Repeat(" ", gap) + right
+	return lipgloss.NewStyle().
+		Background(lipgloss.Color("236")).
+		Width(width).
+		Render(line)
+}
+
+// ---------------------------------------------------------------------------
+// Bottom bar
+// ---------------------------------------------------------------------------
+
+func renderBottomBar(width int, state dashboardSnapshot) string {
+	if state.Mode == modeFilter {
+		prompt := filterPrompt.Render("Filter: ")
+		text := filterInput.Render(state.Filter + "█")
+		hint := barDim.Render("  enter:apply  esc:cancel  ctrl+u:clear")
+		line := prompt + text + hint
+		return lipgloss.NewStyle().
+			Background(lipgloss.Color("236")).
+			Width(width).
+			Render(line)
+	}
+
+	hints := barDim.Render(" j/k:move  enter:expand  space:pause  /:filter  c:clear  g/G:top/bottom  q:quit")
+	return lipgloss.NewStyle().
+		Background(lipgloss.Color("236")).
+		Width(width).
+		Render(hints)
+}
+
+// ---------------------------------------------------------------------------
+// Table
+// ---------------------------------------------------------------------------
+
+func renderTableHeader(width int) string {
+	cols := tableColumns(width)
+	var b strings.Builder
+	for _, col := range cols {
+		b.WriteString(fitToWidth(col.header, col.width))
+		b.WriteString(" ")
+	}
+	return tableHeaderStyle.Width(width).Render(b.String())
+}
+
+type tableColumn struct {
+	header string
+	width  int
+}
+
+func tableColumns(totalWidth int) []tableColumn {
+	// #(4) Time(10) Method(18) Tool(20) Client(16) Status(7) Latency(9) Size(8)
+	// Minimum ~92 chars. Tool and Method get leftover space.
+	fixed := 4 + 10 + 7 + 9 + 8 + 16 + len("       ") // gaps
+	flex := totalWidth - fixed
+	if flex < 20 {
+		flex = 20
+	}
+	methodW := flex * 2 / 5
+	toolW := flex - methodW
+
+	return []tableColumn{
+		{"#", 4},
+		{"Time", 10},
+		{"Method", methodW},
+		{"Tool", toolW},
+		{"Client", 16},
+		{"Status", 7},
+		{"Latency", 9},
+		{"Size", 8},
+	}
+}
+
+func renderTableBody(width, rows int, state dashboardSnapshot, filtered []int) string {
+	if len(filtered) == 0 {
+		empty := rowDim.Render("  No matching requests.")
+		lines := []string{empty}
+		for i := 1; i < rows; i++ {
+			lines = append(lines, "")
+		}
+		return strings.Join(lines, "\n")
+	}
+
+	// Find selected index in filtered list
+	selFilterIdx := -1
+	for i, idx := range filtered {
+		if idx == state.Selected {
+			selFilterIdx = i
+			break
+		}
+	}
+
+	// Viewport calculation
+	vp := clampViewport(selFilterIdx, state.Viewport, rows, len(filtered))
+	end := vp + rows
+	if end > len(filtered) {
+		end = len(filtered)
+	}
+
+	cols := tableColumns(width)
+	var lines []string
+
+	for fi := vp; fi < end; fi++ {
+		idx := filtered[fi]
+		evt := state.Events[idx]
+		isSelected := idx == state.Selected
+
+		var b strings.Builder
+		values := []string{
+			fmt.Sprintf("%d", idx+1),
+			eventTime(evt),
+			truncateRunes(evt.Method, cols[2].width),
+			truncateRunes(toolShortName(evt.Tool), cols[3].width),
+			truncateRunes(fallback(evt.Client, "-"), cols[4].width),
+			fmt.Sprintf("%d", evt.Status),
+			evt.Latency.Round(time.Millisecond).String(),
+			formatSize(evt.RequestSize + evt.ResponseSize),
+		}
+		for i, val := range values {
+			b.WriteString(fitToWidth(val, cols[i].width))
+			b.WriteString(" ")
+		}
+
+		row := b.String()
+		if isSelected {
+			row = rowSelected.Width(width).Render(row)
+		} else {
+			style := rowStyleForStatus(evt.Status)
+			row = style.Width(width).Render(row)
+		}
+		lines = append(lines, row)
+	}
+
+	// Pad remaining lines
+	for len(lines) < rows {
+		lines = append(lines, "")
+	}
+	return strings.Join(lines, "\n")
+}
+
+func rowStyleForStatus(status int) lipgloss.Style {
+	if status == 401 {
+		return rowUnauth
+	}
+	if status >= 400 {
+		return rowError
+	}
+	if status >= 200 && status < 300 {
+		return rowOk
+	}
+	return rowNormal
+}
+
+// ---------------------------------------------------------------------------
+// Inspector
+// ---------------------------------------------------------------------------
+
+func renderInspector(width, rows int, state dashboardSnapshot) string {
 	if state.Selected < 0 || state.Selected >= len(state.Events) {
-		return renderPanel(width, "Inspector", []string{
-			"No request selected.",
-			"Use j/k or the arrow keys to move once traffic starts.",
+		content := inspectorSection.Render("Inspector") + "\n" +
+			rowDim.Render("  Select a request to inspect.")
+		return padToHeight(content, rows)
+	}
+
+	evt := state.Events[state.Selected]
+	var lines []string
+
+	lines = append(lines, inspectorSection.Render("Inspector")+" "+
+		rowDim.Render(fmt.Sprintf("#%d", state.Selected+1)))
+
+	lines = append(lines, inspectorRow("Method", evt.Method))
+	lines = append(lines, inspectorRow("Tool", toolShortName(evt.Tool)))
+	lines = append(lines, inspectorRow("Client", fallback(evt.Client, "-")))
+	lines = append(lines, inspectorRow("Status", fmt.Sprintf("%d", evt.Status)))
+	lines = append(lines, inspectorRow("Latency", evt.Latency.Round(time.Millisecond).String()))
+	lines = append(lines, inspectorRow("Time", eventTime(evt)))
+	if evt.RequestID != "" {
+		lines = append(lines, inspectorRow("Request ID", evt.RequestID))
+	}
+	lines = append(lines, inspectorRow("Size", fmt.Sprintf("%s in / %s out",
+		formatSize(evt.RequestSize), formatSize(evt.ResponseSize))))
+
+	if state.Expanded {
+		if evt.RequestParams != "" {
+			lines = append(lines, "")
+			lines = append(lines, inspectorSection.Render("Request Params"))
+			for _, pl := range wrapText(evt.RequestParams, width-4) {
+				lines = append(lines, "  "+pl)
+			}
+		}
+		if evt.Details != "" {
+			lines = append(lines, inspectorRow("Details", evt.Details))
+		}
+		if evt.Error != "" {
+			lines = append(lines, inspectorRow("Error", rowError.Render(evt.Error)))
+		}
+	} else if len(lines) < rows {
+		lines = append(lines, rowDim.Render("  press enter to expand"))
+	}
+
+	content := strings.Join(lines, "\n")
+	return padToHeight(content, rows)
+}
+
+func inspectorRow(label, value string) string {
+	return inspectorLabel.Render(label) + " " + inspectorValue.Render(value)
+}
+
+// ---------------------------------------------------------------------------
+// Filter
+// ---------------------------------------------------------------------------
+
+func filterEvents(events []MCPEvent, filter string) []int {
+	filter = strings.TrimSpace(filter)
+	indices := make([]int, 0, len(events))
+	if filter == "" {
+		for i := range events {
+			indices = append(indices, i)
+		}
+		return indices
+	}
+
+	terms := strings.Fields(strings.ToLower(filter))
+	for i, evt := range events {
+		if eventMatchesFilter(evt, terms) {
+			indices = append(indices, i)
+		}
+	}
+	return indices
+}
+
+func eventMatchesFilter(evt MCPEvent, terms []string) bool {
+	for _, term := range terms {
+		negate := false
+		if strings.HasPrefix(term, "-") {
+			negate = true
+			term = term[1:]
+		}
+
+		matched := false
+		if k, v, ok := strings.Cut(term, ":"); ok {
+			matched = fieldMatch(evt, k, v)
+		} else {
+			blob := strings.ToLower(evt.Method + " " + evt.Tool + " " + evt.Client + " " + evt.Details + " " + evt.Error)
+			matched = strings.Contains(blob, term)
+		}
+
+		if negate {
+			matched = !matched
+		}
+		if !matched {
+			return false
+		}
+	}
+	return true
+}
+
+func fieldMatch(evt MCPEvent, key, value string) bool {
+	switch key {
+	case "tool":
+		return strings.Contains(strings.ToLower(toolShortName(evt.Tool)), value)
+	case "method":
+		return strings.Contains(strings.ToLower(evt.Method), value)
+	case "client":
+		return strings.Contains(strings.ToLower(evt.Client), value)
+	case "status":
+		return fmt.Sprintf("%d", evt.Status) == value
+	case "error":
+		return strings.Contains(strings.ToLower(evt.Error), value)
+	default:
+		return false
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Dashboard state management
+// ---------------------------------------------------------------------------
+
+func (d *MCPDashboard) handleInput(cmd string) {
+	if cmd == "" {
+		return
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	tableRows := d.visibleTableRows()
+
+	switch cmd {
+	case "quit":
+		d.stopOnce.Do(func() {
+			if d.program != nil {
+				d.program.Quit()
+			}
 		})
+	case "up":
+		d.selected = clamp(d.selected-1, 0, d.maxSelectable())
+		d.expanded = false
+	case "down":
+		d.selected = clamp(d.selected+1, 0, d.maxSelectable())
+		d.expanded = false
+	case "home":
+		d.selected = 0
+		d.viewport = 0
+		d.expanded = false
+	case "end":
+		d.selected = d.maxSelectable()
+		d.expanded = false
+	case "pagedown":
+		d.selected = clamp(d.selected+tableRows/2, 0, d.maxSelectable())
+		d.expanded = false
+	case "pageup":
+		d.selected = clamp(d.selected-tableRows/2, 0, d.maxSelectable())
+		d.expanded = false
+	case "toggle":
+		if d.selected >= 0 {
+			d.expanded = !d.expanded
+		}
+	case "pause":
+		d.paused = !d.paused
+	case "clear":
+		d.events = d.events[:0]
+		d.reqCount = 0
+		d.okCount = 0
+		d.errCount = 0
+		d.unauth = 0
+		d.selected = -1
+		d.viewport = 0
+		d.expanded = false
+	case "filter":
+		d.mode = modeFilter
+		d.filter = ""
+	case "escape":
+		d.filter = ""
+		d.mode = modeNormal
 	}
-
-	event := state.Events[state.Selected]
-	lines := []string{
-		fmt.Sprintf("Tool      %s", fallback(event.Tool, "unknown")),
-		fmt.Sprintf("Method    %s", fallback(event.Method, "unknown")),
-		fmt.Sprintf("Client    %s", fallback(event.Client, "unknown")),
-		fmt.Sprintf("Status    %d", event.Status),
-		fmt.Sprintf("Latency   %s", event.Latency.Round(time.Millisecond)),
-		fmt.Sprintf("Captured  %s", eventTime(event)),
+	if d.selected >= 0 {
+		d.viewport = clampViewport(d.selected, d.viewport, tableRows, len(d.events))
 	}
-
-	if !state.Expanded {
-		lines = append(lines,
-			"",
-			"Press Enter or Space to reveal full request details.",
-			"Press c to clear the stream.",
-		)
-		return renderPanel(width, "Inspector", lines)
-	}
-
-	lines = append(lines, "")
-	if strings.TrimSpace(event.Details) != "" {
-		lines = append(lines, "Details", strings.TrimSpace(event.Details))
-	}
-	if strings.TrimSpace(event.Error) != "" {
-		lines = append(lines, "Error", strings.TrimSpace(event.Error))
-	}
-	if strings.TrimSpace(event.Details) == "" && strings.TrimSpace(event.Error) == "" {
-		lines = append(lines, "No extra request details captured for this event.")
-	}
-	return renderPanel(width, "Inspector", lines)
 }
 
-func renderFooterPanel(width int, live bool) string {
-	lines := []string{"j/k or arrows move   enter expands   c clears   q quits"}
-	if !live {
-		lines = append(lines, "Setup stays visible until the first request arrives.")
-	}
-	return renderPanel(width, "Controls", lines)
+func (d *MCPDashboard) visibleTableRows() int {
+	// Approximate; will be refined by actual height in View
+	return 20
 }
 
-func renderPanel(width int, title string, lines []string) string {
-	if width < 16 {
-		width = 16
+func (d *MCPDashboard) maxSelectable() int {
+	if len(d.events) == 0 {
+		return 0
 	}
-	inner := width - 2
-	contentWidth := inner - 2
-	if contentWidth < 1 {
-		contentWidth = 1
-	}
-
-	var b strings.Builder
-	b.WriteString("╭" + strings.Repeat("─", inner) + "╮\n")
-	b.WriteString("│ " + fitToWidth(title, contentWidth) + " │\n")
-	b.WriteString("├" + strings.Repeat("─", inner) + "┤\n")
-	for _, line := range lines {
-		if strings.TrimSpace(line) == "" {
-			b.WriteString("│ " + strings.Repeat(" ", contentWidth) + " │\n")
-			continue
-		}
-		for _, wrapped := range wrapText(line, contentWidth) {
-			b.WriteString("│ " + fitToWidth(wrapped, contentWidth) + " │\n")
-		}
-	}
-	b.WriteString("╰" + strings.Repeat("─", inner) + "╯")
-	return b.String()
+	return len(d.events) - 1
 }
 
-func joinColumns(gap int, blocks ...string) string {
-	if len(blocks) == 0 {
-		return ""
-	}
-	type column struct {
-		lines []string
-		width int
-	}
-	cols := make([]column, 0, len(blocks))
-	maxHeight := 0
-	for _, block := range blocks {
-		lines := strings.Split(strings.TrimSuffix(block, "\n"), "\n")
-		colWidth := 0
-		for _, line := range lines {
-			colWidth = max(colWidth, runeWidth(line))
+func (d *MCPDashboard) recordEvent(evt MCPEvent) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	if d.paused {
+		// Still count, but don't update selection/viewport
+		d.reqCount++
+		if evt.Status >= 400 || evt.Error != "" {
+			d.errCount++
+		} else {
+			d.okCount++
 		}
-		cols = append(cols, column{lines: lines, width: colWidth})
-		maxHeight = max(maxHeight, len(lines))
+		if evt.Status == 401 {
+			d.unauth++
+		}
+		if len(d.events) >= tuiLogCapacity {
+			copy(d.events, d.events[1:])
+			d.events[len(d.events)-1] = evt
+		} else {
+			d.events = append(d.events, evt)
+		}
+		return
 	}
 
-	var b strings.Builder
-	separator := strings.Repeat(" ", gap)
-	for row := 0; row < maxHeight; row++ {
-		for i, col := range cols {
-			line := ""
-			if row < len(col.lines) {
-				line = col.lines[row]
-			}
-			b.WriteString(fitToWidth(line, col.width))
-			if i < len(cols)-1 {
-				b.WriteString(separator)
-			}
+	if len(d.events) >= tuiLogCapacity {
+		copy(d.events, d.events[1:])
+		d.events[len(d.events)-1] = evt
+		if d.selected > 0 {
+			d.selected--
 		}
-		if row < maxHeight-1 {
-			b.WriteString("\n")
-		}
+		d.viewport--
+	} else {
+		d.events = append(d.events, evt)
 	}
-	return b.String()
+	d.reqCount++
+	if evt.Status >= 400 || evt.Error != "" {
+		d.errCount++
+	} else {
+		d.okCount++
+	}
+	if evt.Status == 401 {
+		d.unauth++
+	}
+	if d.selected == -1 {
+		d.selected = len(d.events) - 1
+	}
+	if d.viewport < 0 {
+		d.viewport = 0
+	}
+	d.viewport = clampViewport(d.selected, d.viewport, d.visibleTableRows(), len(d.events))
 }
 
-func summarizeEvent(evt MCPEvent) string {
-	name := evt.Tool
-	if strings.TrimSpace(name) == "" {
-		name = evt.Method
+// ---------------------------------------------------------------------------
+// Snapshot
+// ---------------------------------------------------------------------------
+
+type dashboardSnapshot struct {
+	LocalURL           string
+	RemoteURL          string
+	RootDir            string
+	ExposePath         string
+	Exposed            bool
+	Token              string
+	TokenAutoGenerated bool
+	TailscaleHost      string
+	TailscalePort      int
+	StartedAt          time.Time
+	ReqCount           int
+	OkCount            int
+	ErrCount           int
+	Unauth             int
+	Events             []MCPEvent
+	Selected           int
+	Expanded           bool
+	Viewport           int
+	Paused             bool
+	Mode               tuiMode
+	Filter             string
+}
+
+func (d *MCPDashboard) snapshot() dashboardSnapshot {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	copied := make([]MCPEvent, len(d.events))
+	copy(copied, d.events)
+
+	return dashboardSnapshot{
+		LocalURL:           d.localURL,
+		RemoteURL:          d.remoteURL,
+		RootDir:            d.rootDir,
+		ExposePath:         d.exposePath,
+		Exposed:            d.exposeActive,
+		Token:              d.authToken,
+		TokenAutoGenerated: d.tokenAutoGenerated,
+		TailscaleHost:      d.tailscaleHost,
+		TailscalePort:      d.tailscalePort,
+		StartedAt:          d.startedAt,
+		ReqCount:           d.reqCount,
+		OkCount:            d.okCount,
+		ErrCount:           d.errCount,
+		Unauth:             d.unauth,
+		Events:             copied,
+		Selected:           d.selected,
+		Expanded:           d.expanded,
+		Viewport:           d.viewport,
+		Paused:             d.paused,
+		Mode:               d.mode,
+		Filter:             d.filter,
 	}
-	status := fmt.Sprintf("%d", evt.Status)
-	if evt.Status >= 400 {
-		status = "error " + status
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+func toolShortName(tool string) string {
+	if after, ok := strings.CutPrefix(tool, "tools.call:"); ok {
+		return after
 	}
-	return fmt.Sprintf("%s  %s  %s", name, status, evt.Latency.Round(time.Millisecond))
+	return tool
+}
+
+func formatSize(bytes int) string {
+	if bytes <= 0 {
+		return "-"
+	}
+	if bytes < 1024 {
+		return fmt.Sprintf("%dB", bytes)
+	}
+	if bytes < 1024*1024 {
+		return fmt.Sprintf("%.1fK", float64(bytes)/1024)
+	}
+	return fmt.Sprintf("%.1fM", float64(bytes)/(1024*1024))
 }
 
 func eventTime(evt MCPEvent) string {
@@ -485,6 +981,13 @@ func fallback(value string, replacement string) string {
 		return replacement
 	}
 	return value
+}
+
+func boolToWord(b bool) string {
+	if b {
+		return "enabled"
+	}
+	return "disabled"
 }
 
 func fitToWidth(value string, width int) string {
@@ -516,176 +1019,37 @@ func runeWidth(value string) int {
 	return utf8.RuneCountInString(value)
 }
 
-func (d *MCPDashboard) Stop() {
-	d.stopOnce.Do(func() {
-		d.mu.Lock()
-		p := d.program
-		d.mu.Unlock()
-		if p != nil {
-			p.Quit()
-		}
-	})
+func padToHeight(content string, rows int) string {
+	lines := strings.Split(content, "\n")
+	for len(lines) < rows {
+		lines = append(lines, "")
+	}
+	if len(lines) > rows {
+		lines = lines[:rows]
+	}
+	return strings.Join(lines, "\n")
 }
 
-func (d *MCPDashboard) handleInput(cmd string) {
-	if cmd == "" {
-		return
-	}
-	d.mu.Lock()
-	defer d.mu.Unlock()
-
-	switch cmd {
-	case "quit":
-		d.stopOnce.Do(func() {
-			if d.program != nil {
-				d.program.Quit()
-			}
-		})
-	case "up":
-		d.selected = clamp(d.selected-1, 0, d.maxSelectable())
-		d.expanded = false
-	case "down":
-		d.selected = clamp(d.selected+1, 0, d.maxSelectable())
-		d.expanded = false
-	case "toggle":
-		if d.selected >= 0 {
-			d.expanded = !d.expanded
-		}
-	case "clear":
-		d.events = d.events[:0]
-		d.reqCount = 0
-		d.okCount = 0
-		d.errCount = 0
-		d.unauth = 0
-		d.selected = -1
-		d.viewport = 0
-		d.expanded = false
-	}
-	if d.selected >= 0 {
-		d.viewport = clampViewport(d.selected, d.viewport, logRows, len(d.events))
-	}
-}
-
-func (d *MCPDashboard) maxSelectable() int {
-	if len(d.events) == 0 {
-		return 0
-	}
-	return len(d.events) - 1
-}
-
-func (d *MCPDashboard) recordEvent(evt MCPEvent) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-
-	if len(d.events) >= tuiLogCapacity {
-		copy(d.events, d.events[1:])
-		d.events[len(d.events)-1] = evt
-		if d.selected > 0 {
-			d.selected--
-		}
-		d.viewport--
-	} else {
-		d.events = append(d.events, evt)
-	}
-	d.reqCount++
-	if evt.Status >= 400 || evt.Error != "" {
-		d.errCount++
-	} else {
-		d.okCount++
-	}
-	if evt.Status == 401 {
-		d.unauth++
-	}
-	if d.selected == -1 {
-		d.selected = len(d.events) - 1
-	}
-	if d.viewport < 0 {
-		d.viewport = 0
-	}
-	d.viewport = clampViewport(d.selected, d.viewport, logRows, len(d.events))
-}
-
-type dashboardSnapshot struct {
-	LocalURL           string
-	RemoteURL          string
-	RootDir            string
-	ExposePath         string
-	Exposed            bool
-	Token              string
-	TokenAutoGenerated bool
-	TailscaleHost      string
-	TailscalePort      int
-	StartedAt          time.Time
-	ReqCount           int
-	OkCount            int
-	ErrCount           int
-	Unauth             int
-	Events             []MCPEvent
-	Selected           int
-	Expanded           bool
-	Viewport           int
-}
-
-func (d *MCPDashboard) snapshot() dashboardSnapshot {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-
-	copied := make([]MCPEvent, len(d.events))
-	copy(copied, d.events)
-
-	return dashboardSnapshot{
-		LocalURL:           d.localURL,
-		RemoteURL:          d.remoteURL,
-		RootDir:            d.rootDir,
-		ExposePath:         d.exposePath,
-		Exposed:            d.exposeActive,
-		Token:              d.authToken,
-		TokenAutoGenerated: d.tokenAutoGenerated,
-		TailscaleHost:      d.tailscaleHost,
-		TailscalePort:      d.tailscalePort,
-		StartedAt:          d.startedAt,
-		ReqCount:           d.reqCount,
-		OkCount:            d.okCount,
-		ErrCount:           d.errCount,
-		Unauth:             d.unauth,
-		Events:             copied,
-		Selected:           d.selected,
-		Expanded:           d.expanded,
-		Viewport:           d.viewport,
-	}
-}
-
-func boolToWord(b bool) string {
-	if b {
-		return "enabled"
-	}
-	return "disabled"
-}
-
-func wrapText(value string, max int) []string {
-	if max <= 0 {
+func wrapText(value string, maxW int) []string {
+	if maxW <= 0 {
 		return []string{""}
 	}
 	tokens := strings.Split(value, " ")
 	if len(tokens) == 0 {
 		return []string{""}
 	}
-
 	lines := make([]string, 0)
 	current := tokens[0]
 	for i := 1; i < len(tokens); i++ {
 		n := tokens[i]
-		if runeWidth(current)+1+runeWidth(n) > max {
-			lines = append(lines, padLine(current, max))
+		if runeWidth(current)+1+runeWidth(n) > maxW {
+			lines = append(lines, padLine(current, maxW))
 			current = n
 			continue
 		}
 		current = current + " " + n
 	}
-	lines = append(lines, padLine(current, max))
-	if len(lines) > detailLinesLimit {
-		lines = lines[:detailLinesLimit]
-	}
+	lines = append(lines, padLine(current, maxW))
 	return lines
 }
 

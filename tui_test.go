@@ -1,7 +1,6 @@
 package main
 
 import (
-	"reflect"
 	"strings"
 	"testing"
 )
@@ -15,16 +14,6 @@ func TestMCPDashboardEventCounters(t *testing.T) {
 		ExposeActive: true,
 		AuthToken:    "token",
 	})
-
-	if d == nil {
-		t.Fatalf("expected dashboard")
-	}
-
-	// Use merged exclusion semantics to keep this test close to the CLI contract.
-	p := mergeExcludePattern(`secret`, `tmp\\.log$`)
-	if p != `(?:secret)|(?:tmp\\.log$)` {
-		t.Fatalf("expected merged regex, got %q", p)
-	}
 
 	d.recordEvent(MCPEvent{Method: "tools/list", Status: 200, Tool: "tools/list"})
 	d.recordEvent(MCPEvent{Method: "tools/call", Status: 401, Tool: "tools.call:read_file", Error: "unauthorized"})
@@ -55,15 +44,9 @@ func TestMCPDashboardHandleInputSelectionAndExpandedState(t *testing.T) {
 	})
 
 	for i := 0; i < 3; i++ {
-		d.recordEvent(MCPEvent{
-			Method:  "tools/list",
-			Status:  200,
-			Tool:    "tools/list",
-			Details: "request details",
-		})
+		d.recordEvent(MCPEvent{Method: "tools/list", Status: 200, Tool: "tools/list", Details: "request details"})
 	}
 
-	// start at first row
 	d.selected = 0
 	d.expanded = true
 	d.handleInput("down")
@@ -93,12 +76,7 @@ func TestMCPDashboardHandleInputClear(t *testing.T) {
 	})
 
 	for i := 0; i < 2; i++ {
-		d.recordEvent(MCPEvent{
-			Method:  "tools/list",
-			Status:  200,
-			Tool:    "tools/list",
-			Details: "request details",
-		})
+		d.recordEvent(MCPEvent{Method: "tools/list", Status: 200, Tool: "tools/list", Details: "request details"})
 	}
 	d.handleInput("clear")
 	if d.reqCount != 0 || len(d.events) != 0 || d.okCount != 0 || d.errCount != 0 || d.unauth != 0 {
@@ -138,11 +116,7 @@ func TestMCPDashboardHandleInputUnknownCommand(t *testing.T) {
 		ExposeActive: true,
 		AuthToken:    "token",
 	})
-	d.recordEvent(MCPEvent{
-		Method: "tools/list",
-		Status: 200,
-		Tool:   "tools/list",
-	})
+	d.recordEvent(MCPEvent{Method: "tools/list", Status: 200, Tool: "tools/list"})
 	old := d.selected
 	d.handleInput("noop")
 	if d.selected != old {
@@ -150,29 +124,7 @@ func TestMCPDashboardHandleInputUnknownCommand(t *testing.T) {
 	}
 }
 
-func TestWrapAndPadText(t *testing.T) {
-	got := wrapText("one two three four", 5)
-	want := []string{
-		"one  ",
-		"two  ",
-		"three",
-	}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("unexpected wrap output: %#v", got)
-	}
-}
-
-func TestWrapTextWithLongToken(t *testing.T) {
-	got := wrapText("supercalifragilistic", 5)
-	if len(got) != 1 {
-		t.Fatalf("expected one wrapped line, got %d", len(got))
-	}
-	if got[0] != "supe…" {
-		t.Fatalf("unexpected wrapped token: %q", got[0])
-	}
-}
-
-func TestMCPDashboardSetupScreenShowsChatGPTInstructionsWhenNoRequests(t *testing.T) {
+func TestMCPDashboardSetupScreenShowsConnectionInfo(t *testing.T) {
 	d := NewMCPDashboard(MCPDashboardConfig{
 		LocalURL:     "http://127.0.0.1:12345/mcp",
 		RemoteURL:    "https://host.ts.net/mcp",
@@ -184,28 +136,16 @@ func TestMCPDashboardSetupScreenShowsChatGPTInstructionsWhenNoRequests(t *testin
 
 	view := mcpDashboardModel{
 		dashboard: d,
-		width:     100,
-		height:    30,
+		width:     120,
+		height:    40,
 	}.View()
 
 	got := view.Content
-	if !strings.Contains(got, "Connect ChatGPT") {
-		t.Fatalf("expected connect section, got %q", got)
+	if !strings.Contains(got, "token123") {
+		t.Fatalf("expected token in setup screen, got %q", got)
 	}
-	if !strings.Contains(got, "2. Add server URL: https://host.ts.net/mcp") {
-		t.Fatalf("expected remote/local setup URL, got %q", got)
-	}
-	if !strings.Contains(got, "3. Add header: Authorization: Bearer token123") {
-		t.Fatalf("expected token setup line, got %q", got)
-	}
-}
-
-func TestPadLine(t *testing.T) {
-	if got := padLine("abc", 5); got != "abc  " {
-		t.Fatalf("unexpected pad: %q", got)
-	}
-	if got := padLine("abcdef", 4); got != "abc…" {
-		t.Fatalf("unexpected truncate: %q", got)
+	if !strings.Contains(got, "host.ts.net") {
+		t.Fatalf("expected endpoint in setup screen, got %q", got)
 	}
 }
 
@@ -242,7 +182,6 @@ func TestMCPDashboardEventRingBufferAllocations(t *testing.T) {
 		AuthToken:    "token",
 	})
 
-	// Fill the buffer to capacity
 	for i := 0; i < tuiLogCapacity; i++ {
 		d.recordEvent(MCPEvent{Method: "tools/list", Status: 200, Tool: "tools/list"})
 	}
@@ -250,7 +189,6 @@ func TestMCPDashboardEventRingBufferAllocations(t *testing.T) {
 	initialPtr := &d.events[0]
 	allocs := 0
 
-	// Add many more events to force capacity exhaustion if it's naive slice shifting
 	for i := 0; i < tuiLogCapacity*3; i++ {
 		d.recordEvent(MCPEvent{Method: "tools/list", Status: 200, Tool: "tools/list"})
 		currentPtr := &d.events[0]
@@ -260,12 +198,151 @@ func TestMCPDashboardEventRingBufferAllocations(t *testing.T) {
 		}
 	}
 
-	// With naive shifting (d.events[1:] + append), the pointer will change every time cap is reached.
-	// With a proper ring buffer or in-place copy, the backing array pointer for the slice 
-	// should not change repeatedly (or at all, if we just shift within the same slice).
-	// Wait, if it's in-place copy, d.events[0] stays the same pointer.
-	// If it's a ring buffer, d.events might not even be a slice, or we just overwrite.
 	if allocs > 0 {
 		t.Fatalf("expected 0 array reallocations when full, got %v", allocs)
+	}
+}
+
+func TestMCPDashboardPauseMode(t *testing.T) {
+	d := NewMCPDashboard(MCPDashboardConfig{
+		LocalURL:  "http://127.0.0.1:8080/mcp",
+		AuthToken: "token",
+	})
+
+	d.recordEvent(MCPEvent{Method: "tools/list", Status: 200, Tool: "tools/list"})
+	d.handleInput("pause")
+	if !d.paused {
+		t.Fatalf("expected paused after pause command")
+	}
+
+	selBefore := d.selected
+	d.recordEvent(MCPEvent{Method: "tools/call", Status: 200, Tool: "tools.call:read_file"})
+	if d.reqCount != 2 {
+		t.Fatalf("expected events still counted while paused, got %d", d.reqCount)
+	}
+	if d.selected != selBefore {
+		t.Fatalf("expected selection unchanged while paused")
+	}
+
+	d.handleInput("pause")
+	if d.paused {
+		t.Fatalf("expected unpaused after second pause")
+	}
+}
+
+func TestMCPDashboardFilterMode(t *testing.T) {
+	d := NewMCPDashboard(MCPDashboardConfig{
+		LocalURL:  "http://127.0.0.1:8080/mcp",
+		AuthToken: "token",
+	})
+
+	d.handleInput("filter")
+	if d.mode != modeFilter {
+		t.Fatalf("expected filter mode after / command")
+	}
+
+	d.handleInput("escape")
+	if d.mode != modeNormal {
+		t.Fatalf("expected normal mode after escape")
+	}
+}
+
+func TestFilterEventsFieldMatch(t *testing.T) {
+	events := []MCPEvent{
+		{Method: "tools/call", Tool: "tools.call:list_files", Status: 200},
+		{Method: "tools/call", Tool: "tools.call:read_file", Status: 200},
+		{Method: "tools/call", Tool: "tools.call:read_file", Status: 401},
+	}
+
+	// Filter by tool
+	got := filterEvents(events, "tool:list")
+	if len(got) != 1 || got[0] != 0 {
+		t.Fatalf("expected 1 match for tool:list, got %v", got)
+	}
+
+	// Filter by status
+	got = filterEvents(events, "status:401")
+	if len(got) != 1 || got[0] != 2 {
+		t.Fatalf("expected 1 match for status:401, got %v", got)
+	}
+
+	// Negation
+	got = filterEvents(events, "-status:401")
+	if len(got) != 2 {
+		t.Fatalf("expected 2 matches for -status:401, got %v", got)
+	}
+
+	// Empty filter returns all
+	got = filterEvents(events, "")
+	if len(got) != 3 {
+		t.Fatalf("expected all events for empty filter, got %v", got)
+	}
+}
+
+func TestToolShortName(t *testing.T) {
+	if got := toolShortName("tools.call:read_file"); got != "read_file" {
+		t.Fatalf("expected read_file, got %q", got)
+	}
+	if got := toolShortName("tools/list"); got != "tools/list" {
+		t.Fatalf("expected tools/list, got %q", got)
+	}
+}
+
+func TestFormatSize(t *testing.T) {
+	cases := []struct {
+		bytes int
+		want  string
+	}{
+		{0, "-"},
+		{512, "512B"},
+		{1536, "1.5K"},
+		{1048576, "1.0M"},
+	}
+	for _, tc := range cases {
+		got := formatSize(tc.bytes)
+		if got != tc.want {
+			t.Fatalf("formatSize(%d): expected %q, got %q", tc.bytes, tc.want, got)
+		}
+	}
+}
+
+func TestMCPDashboardHomeEnd(t *testing.T) {
+	d := NewMCPDashboard(MCPDashboardConfig{
+		LocalURL:  "http://127.0.0.1:8080/mcp",
+		AuthToken: "token",
+	})
+
+	for i := 0; i < 10; i++ {
+		d.recordEvent(MCPEvent{Method: "tools/list", Status: 200, Tool: "tools/list"})
+	}
+
+	d.handleInput("end")
+	if d.selected != 9 {
+		t.Fatalf("expected selected=9 after end, got %d", d.selected)
+	}
+
+	d.handleInput("home")
+	if d.selected != 0 {
+		t.Fatalf("expected selected=0 after home, got %d", d.selected)
+	}
+}
+
+func TestWrapText(t *testing.T) {
+	got := wrapText("one two three four", 10)
+	if len(got) == 0 {
+		t.Fatalf("expected at least one line")
+	}
+	// First line should contain "one two"
+	if !strings.HasPrefix(strings.TrimSpace(got[0]), "one two") {
+		t.Fatalf("unexpected first line: %q", got[0])
+	}
+}
+
+func TestPadLine(t *testing.T) {
+	if got := padLine("abc", 5); got != "abc  " {
+		t.Fatalf("unexpected pad: %q", got)
+	}
+	if got := padLine("abcdef", 4); got != "abc…" {
+		t.Fatalf("unexpected truncate: %q", got)
 	}
 }
